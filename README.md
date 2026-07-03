@@ -165,12 +165,4 @@ uv sync && uv run pytest
   slot fanned out over NOTIFY; a native (Zig) implementation is the
   intended long-term core.
 
-## Lineage
-
-Designed out of a real problem — a warehouse-monitoring TUI refetching its
-world every two seconds — via a research arc through sentinel polling,
-triggers (rejected: persistent), and the discovery that the temporary
-replication slot is the *only* connection-scoped change-feed primitive
-PostgreSQL has. So pgwake learned to speak walsender.
-
 MIT licensed.
