@@ -9,7 +9,7 @@
 
 Your database moves; your app wakes up. pgwake tells you *that* something
 changed and *which tables* — you already know how to load the data. Built
-for live read models: TUIs, dashboards, cache invalidation, anything that
+for live read models: dashboards, cache invalidation, anything that
 renders a query and wants to re-render the instant the database moves.
 
 ```
