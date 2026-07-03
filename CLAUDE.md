@@ -177,7 +177,7 @@ Untested / absent: `ssl=True` verify-full against a real managed endpoint
 built-in PgBouncer there, use direct 5432); MD5 auth (deliberately absent);
 pgoutput (see the publications warning above); behavior under a
 long-running write transaction at connect (slot creation waits — connect
-latency, never history); PG 14/15 (in the CI matrix, not yet run); the CI
+latency, never history); PG 18 (in the CI matrix, not yet run); the CI
 workflow itself.
 
 ## Backlog, priority order
@@ -192,7 +192,8 @@ workflow itself.
 1. ~~pytest-ify~~ — DONE 2026-07-03: testcontainers session fixture,
    scratch DB per test, EXTERNAL_POSTGRES_DSN escape hatch.
 2. ~~CI~~ — DONE 2026-07-03: `.github/workflows/ci.yml`, Python 3.13/3.14 ×
-   PG 14–17 (test_decoding) + one wal2json job on debezium/postgres:16.
+   PG 16–18 (test_decoding; floor is PG 16+, owner call 2026-07-03) + one
+   wal2json job on debezium/postgres:16.
    Repo pushed to github.com/janbjorge/pgwake 2026-07-03 — check Actions
    for the first real runs.
 3. **Bridge daemon** as a first-class example or subpackage: one WalFeed ->

@@ -16,9 +16,10 @@ renders a query and wants to re-render the instant the database moves.
 pip install pgwake
 ```
 
-Python ≥ 3.13. One dependency: [scramp](https://github.com/tlocke/scramp)
-(pure-Python SCRAM auth). No database driver, no psycopg anywhere — pgwake
-speaks the PostgreSQL replication protocol itself.
+Python ≥ 3.13, PostgreSQL ≥ 16. One dependency:
+[scramp](https://github.com/tlocke/scramp) (pure-Python SCRAM auth). No
+database driver, no psycopg anywhere — pgwake speaks the PostgreSQL
+replication protocol itself.
 
 ## Sixty-second tour
 
@@ -65,11 +66,11 @@ triggers, no functions, no catalog objects, no persistent slots, no cleanup
 jobs. The test suite ends by hard-aborting the socket with no protocol
 goodbye and asserting `pg_replication_slots` is empty.
 
-What *is* required is one-time server **configuration** (settings, not
-objects — nothing accumulates): `wal_level = logical`, a role with
-`REPLICATION`, and an output plugin — `wal2json` (default; preinstalled on
-Azure Flexible Server, RDS, and most managed platforms) or `test_decoding`
-(ships inside PostgreSQL itself).
+What *is* required is PostgreSQL 16+ and one-time server **configuration**
+(settings, not objects — nothing accumulates): `wal_level = logical`, a
+role with `REPLICATION`, and an output plugin — `wal2json` (default;
+preinstalled on Azure Flexible Server, RDS, and most managed platforms) or
+`test_decoding` (ships inside PostgreSQL itself).
 
 ## The contract
 
