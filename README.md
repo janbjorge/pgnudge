@@ -2,8 +2,13 @@
 
 **Push-only change nudges from PostgreSQL — nothing left behind on the server.**
 
-Emitters nudge, consumers refetch. pgwake never carries application data —
-it tells you *that* something changed; you already know how to load it. Built
+[![CI](https://github.com/janbjorge/pgwake/actions/workflows/ci.yml/badge.svg)](https://github.com/janbjorge/pgwake/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/pgwake)](https://pypi.org/project/pgwake/)
+[![Python](https://img.shields.io/badge/python-3.13%2B-blue)](https://pypi.org/project/pgwake/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
+Your database moves; your app wakes up. pgwake tells you *that* something
+changed and *which tables* — you already know how to load the data. Built
 for live read models: TUIs, dashboards, cache invalidation, anything that
 renders a query and wants to re-render the instant the database moves.
 
@@ -11,24 +16,9 @@ renders a query and wants to re-render the instant the database moves.
 pip install pgwake
 ```
 
-Requires Python ≥ 3.13. One dependency: scramp (pure-Python SCRAM auth).
-No database driver, no psycopg anywhere.
-
-## The guarantee
-
-`WalFeed` creates **nothing on the server that outlives the connection**. It speaks the walsender protocol itself and
-streams logical decoding from a **TEMPORARY replication slot**, which
-PostgreSQL is contractually obliged to drop the moment the session ends —
-cleanly, by crash, by `kill -9`, by yanked cable, by `pg_terminate_backend`.
-No triggers, no functions, no catalog objects, no persistent slots, no
-cleanup jobs. The live test suite ends by hard-aborting the socket with no
-protocol goodbye and asserting `pg_replication_slots` is empty.
-
-What *is* required is one-time server **configuration** (not objects, no
-cleanup, nothing accumulates): `wal_level = logical`, a role with
-`REPLICATION`, and an output plugin — `wal2json` (default; preinstalled on
-Azure Flexible Server, RDS, and most managed platforms) or `test_decoding`
-(ships inside PostgreSQL itself).
+Python ≥ 3.13. One dependency: [scramp](https://github.com/tlocke/scramp)
+(pure-Python SCRAM auth). No database driver, no psycopg anywhere — pgwake
+speaks the PostgreSQL replication protocol itself.
 
 ## Sixty-second tour
 
@@ -50,7 +40,36 @@ async with WalFeed(
 ```
 
 There is no step 1. Nothing to install in the database, nothing to migrate,
-nothing to revert.
+nothing to revert. Close the connection and the server forgets pgwake ever
+existed.
+
+## The guarantee
+
+`WalFeed` creates **nothing on the server that outlives the connection.**
+
+```
+your app ──── async for item in feed ────▶ Resync | Batch
+  ▲
+  │  walsender protocol (TLS, SCRAM-SHA-256, CopyBoth) — no driver
+  │
+PostgreSQL ── TEMPORARY replication slot ── logical decoding
+              └── dropped by the server the instant the session ends,
+                  cleanly or not
+```
+
+The temporary replication slot is the only primitive in PostgreSQL that
+gives you a change feed with connection-scoped lifetime: the server is
+contractually obliged to drop it the moment the session ends — cleanly, by
+crash, by `kill -9`, by yanked cable, by `pg_terminate_backend`. No
+triggers, no functions, no catalog objects, no persistent slots, no cleanup
+jobs. The test suite ends by hard-aborting the socket with no protocol
+goodbye and asserting `pg_replication_slots` is empty.
+
+What *is* required is one-time server **configuration** (settings, not
+objects — nothing accumulates): `wal_level = logical`, a role with
+`REPLICATION`, and an output plugin — `wal2json` (default; preinstalled on
+Azure Flexible Server, RDS, and most managed platforms) or `test_decoding`
+(ships inside PostgreSQL itself).
 
 ## The contract
 
@@ -78,17 +97,25 @@ waits for write transactions in flight at connect time, so a long-running
 write delays connect — it never causes history to be delivered.)
 
 **Coalescing:** per-row changes within the debounce window collapse
-client-side into one `Event` with a `count` (a 500-row transaction on one
-table = one Event, count=500).
+client-side into one `Event` with a `count` — a 500-row transaction on one
+table is one `Event`, `count=500`, one wakeup, one refetch.
+
+## Why not LISTEN/NOTIFY?
+
+`NOTIFY` doesn't fire itself: making it track data changes means triggers,
+and triggers are persistent catalog objects — schema footprint, migration
+reviews, cleanup jobs, drift. pgwake's whole premise is refusing that
+trade. Logical decoding gets the same wakeups straight from the WAL with
+zero objects. (LISTEN is still great on the *consuming* side — see Fan-out.)
 
 ## Fan-out
 
 One `WalFeed` per process is the normal shape. For many consumers, run one
 `WalFeed` in a small bridge daemon that republishes to a NOTIFY channel via
-`pg_notify`, and let consumers attach with plain LISTEN (any driver — LISTEN
-is session state, zero objects) — no REPLICATION grant per consumer, one
-decoding pass total, and still zero persistent server objects (the bridge's
-temp slot dies with the bridge).
+`pg_notify`, and let consumers attach with plain LISTEN (any driver —
+LISTEN is session state, zero objects). One REPLICATION grant total, one
+decoding pass total, and still zero persistent server objects: the bridge's
+temp slot dies with the bridge.
 
 ## Ops notes
 
@@ -104,6 +131,19 @@ temp slot dies with the bridge).
   widening an app role — logical decoding sees the whole database's stream.
 - TLS: `ssl=True` uses platform CA verification; pass an `ssl.SSLContext`
   for custom trust. SCRAM-SHA-256 and cleartext auth are supported.
+
+## Tested how
+
+The suite spins up real PostgreSQL via testcontainers (nothing to install
+beyond Docker) and proves the claims live: no backfill of pre-connect
+writes, client-side coalescing (50-row txn → one `Event`, `count=50`),
+reconnect gets a fresh slot with the old one auto-dropped, TLS + SCRAM over
+an encrypted stream, and the flagship — hard socket abort with no protocol
+goodbye leaves `pg_replication_slots` empty.
+
+```bash
+uv sync && uv run pytest
+```
 
 ## Non-goals
 
