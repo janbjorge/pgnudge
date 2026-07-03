@@ -17,7 +17,7 @@ import ssl as ssl_module
 from collections.abc import Callable
 from typing import ClassVar
 
-from pgwake.core import BaseFeed
+from pgwake.engine import BaseFeed
 from pgwake.proto import Keepalive, WalsenderConnection, XLogData
 
 __all__ = ["WalFeed"]

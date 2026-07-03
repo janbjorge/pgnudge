@@ -18,8 +18,11 @@ Named `pgwake` (v1.0.0): *pgqueuer moves work, pgwake moves wakefulness.*
 Owner style rules (2026-07-03): no underscore-prefixed module or class
 names, no module-level globals (constants live as class attributes; test
 config lives inside functions). Python-mandated protocol dunders
-(`__init__.py`, `__aenter__`, `__version__`, …) are exempt. Instance
-attributes and helper functions keep the single-underscore convention.
+(`__init__.py`, `__aenter__`, `__version__`, …) are exempt. Plain-class
+instance attributes and helper functions keep the single-underscore
+convention, but dataclass fields are NEVER underscore-prefixed
+(owner, 2026-07-03) — internal state uses `field(init=False)` with a
+plain name instead.
 Python ≥ 3.13, modern syntax where it fits (PEP 695 `type` aliases and
 generics, `Self`, `collections.abc` imports, no `from __future__`).
 Strictest mypy: `strict` + `disallow_any_explicit` — no `Any` anywhere.
@@ -93,10 +96,16 @@ src/pgwake/
               simple query subprotocol), start_replication -> CopyBoth,
               read_stream() -> XLogData | Keepalive, send_standby_status(),
               abort() = deliberate hard close.
-  core.py     Event/Batch/Resync dataclasses + BaseFeed: the engine, pure
-              stdlib (bounded raw queue -> debouncer -> out queue; overflow
-              emits Resync("overflow"); jittered exponential backoff;
-              payload_filter hook; async-iterator surface; aclose).
+  core.py     The contract only: Event/Batch/Resync dataclasses + FeedItem.
+  engine.py   The machinery, one dataclass per concern, pure stdlib:
+              Intake (bounded wakeup buffer, payload_filter, overflow flag),
+              Coalescer (dedup buffer, count per (channel, payload)),
+              Debouncer (rolling window, hard max_batch_wait cap; overflow
+              -> Resync("overflow")), Backoff (jittered exponential),
+              FeedService (wires intake -> debouncer -> out queue, owns
+              tasks/failsafe/shutdown), BaseFeed (thin async-iterator
+              facade; subclass hooks _supervisor/_extra_close). Unit-tested
+              without PostgreSQL in tests/test_engine.py.
   wal.py      WalFeed(BaseFeed): the transport. Supervisor creates a fresh
               TEMPORARY slot per (re)connect (name: pgwake_<pid>_<hex>),
               SNAPSHOT 'nothing', starts replication at 0/0, emits Resync
@@ -112,6 +121,9 @@ tests/
                (self-signed cert) inside the container. Env knobs:
                EXTERNAL_POSTGRES_DSN, POSTGRES_IMAGE, PGWAKE_PLUGIN,
                PGWAKE_TLS.
+  test_engine.py  unit tests for the engine classes (Intake, Coalescer,
+               Debouncer, Backoff, FeedService, BaseFeed via a FakeFeed) —
+               pure asyncio, no PostgreSQL.
   test_wal.py  7 tests incl. the two proofs: no backfill of pre-connect
                writes, and hard abort -> pg_replication_slots EMPTY.
 ```
@@ -181,8 +193,8 @@ workflow itself.
    scratch DB per test, EXTERNAL_POSTGRES_DSN escape hatch.
 2. ~~CI~~ — DONE 2026-07-03: `.github/workflows/ci.yml`, Python 3.13/3.14 ×
    PG 14–17 (test_decoding) + one wal2json job on debezium/postgres:16.
-   NOTE: unverified until pgwake is pushed as its own GitHub repo (it is
-   currently an untracked directory inside the ~/src super-repo).
+   Repo pushed to github.com/janbjorge/pgwake 2026-07-03 — check Actions
+   for the first real runs.
 3. **Bridge daemon** as a first-class example or subpackage: one WalFeed ->
    `pg_notify` on a channel -> plain LISTEN consumers. Zero persistent
    objects end to end (the bridge's slot dies with the bridge).
