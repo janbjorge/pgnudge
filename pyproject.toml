@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pgwake"
+version = "1.0.0"
+description = "Push-only change nudges from PostgreSQL logical replication: the database nudges, consumers refetch."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.13"
+dependencies = ["scramp>=1.4"]
+keywords = ["postgresql", "logical-replication", "change-feed", "asyncio", "cache-invalidation"]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Framework :: AsyncIO",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Database",
+]
+
+[project.urls]
+Homepage = "https://github.com/janbjorge/pgwake"
+
+[dependency-groups]
+dev = [
+  "ruff>=0.4",
+  "mypy>=1.10",
+  "asyncpg>=0.29",  # tests' admin connection only — never a runtime dep
+  "pytest>=8",
+  "pytest-asyncio>=0.24",
+  "testcontainers>=4",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pgwake"]
+
+[tool.ruff]
+line-length = 110
+src = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.mypy]
+strict = true
+files = ["src", "tests"]
+mypy_path = "src"
+disallow_any_explicit = true
+warn_unreachable = true
+enable_error_code = ["redundant-expr", "possibly-undefined", "truthy-bool", "ignore-without-code"]
+
+[[tool.mypy.overrides]]
+module = ["asyncpg.*", "scramp.*", "testcontainers.*"]
+ignore_missing_imports = true
