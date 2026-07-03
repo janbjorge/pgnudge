@@ -1,8 +1,9 @@
 # CLAUDE.md — project handoff
 
 This file is the primary context for working on this codebase. Read it fully
-before changing anything. The design history lives in `docs/` — consult it
-before re-opening any decision marked settled here.
+before changing anything. The design history lives in rekal memory (owner
+removed `docs/` from the public repo 2026-07-03) — search it before
+re-opening any decision marked settled here.
 
 ## What this is
 
@@ -124,7 +125,10 @@ a NOTIFY consumer class.
 The consumer contract, coalescing semantics, and ops notes are in
 `README.md` — treat it as the spec. The full decision history (why not
 sentinel polling, why not triggers, why not Go/Rust/psycopg2, the Zig
-track) is in `docs/design-history.md` and `docs/research-notifications.md`.
+track) lived in `docs/design-history.md` and `docs/research-notifications.md`,
+removed from the repo 2026-07-03 (owner wanted no origin-story/internal
+context public). Settled decisions are summarized in the five laws above;
+ask the owner before re-litigating any of them.
 
 ## Dev environment
 
@@ -204,6 +208,6 @@ LISTEN/NOTIFY) — this library is its broadcast-shaped sibling: *pgqueuer
 moves work, this moves wakefulness*. Target deployment: Azure Database for
 PostgreSQL Flexible Server, PG 16+, schema `versaai`, read-only consumers.
 A native Zig implementation of the walsender core is a someday-ambition
-(see docs/design-history.md, "the Zig track") — design decisions here
-should not foreclose it: the feed contract and payload contract are the
-stable API, transports are pluggable.
+("the Zig track") — design decisions here should not foreclose it: the
+feed contract and payload contract are the stable API, transports are
+pluggable.
