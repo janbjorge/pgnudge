@@ -9,8 +9,8 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v8
       - run: uv sync
       - run: uv run ruff check .
       - run: uv run mypy
@@ -25,8 +25,8 @@ jobs:
     env:
       POSTGRES_IMAGE: postgres:${{ matrix.postgres }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v8
         with:
           python-version: ${{ matrix.python }}
       - run: uv sync
@@ -41,7 +41,7 @@ jobs:
       POSTGRES_IMAGE: pgnudge-wal2json:16
       PGNUDGE_PLUGIN: wal2json
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # no public image ships wal2json for PG 16 (debezium/postgres dropped it),
       # so build one: official postgres + the PGDG package
       - run: |
@@ -51,6 +51,6 @@ jobs:
               && apt-get install -y --no-install-recommends postgresql-16-wal2json \
               && rm -rf /var/lib/apt/lists/*
           EOF
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v8
       - run: uv sync
       - run: uv run pytest -q --cov=pgnudge --cov-report=term-missing --cov-fail-under=98
