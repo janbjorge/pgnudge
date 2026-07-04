@@ -11,29 +11,11 @@ import os
 import uuid
 from collections.abc import AsyncGenerator, Iterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 import asyncpg
 import pytest
-from loguru import logger
 from testcontainers.postgres import PostgresContainer
-
-if TYPE_CHECKING:
-    from loguru import Message  # stub-only name, absent at runtime
-
-
-@pytest.fixture
-def log_records() -> Iterator[list[tuple[str, str]]]:
-    """Captured pgnudge log output as (level name, message) tuples."""
-    records: list[tuple[str, str]] = []
-
-    def sink(message: "Message") -> None:
-        records.append((message.record["level"].name, message.record["message"]))
-
-    sink_id = logger.add(sink, level="DEBUG")
-    yield records
-    logger.remove(sink_id)
 
 
 @dataclass(frozen=True, slots=True)

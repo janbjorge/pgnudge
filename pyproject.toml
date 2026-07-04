@@ -9,7 +9,7 @@ description = "Push-only change nudges from PostgreSQL logical replication: the 
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
-dependencies = ["loguru>=0.7", "scramp>=1.4"]
+dependencies = ["scramp>=1.4"]
 keywords = ["postgresql", "logical-replication", "change-feed", "asyncio", "cache-invalidation"]
 classifiers = [
   "Development Status :: 5 - Production/Stable",

@@ -5,7 +5,7 @@ with zero server footprint**. Consumers get an async iterator of two item
 types — `Resync` (reload everything) and `Batch` (coalesced wakeups saying
 *which tables moved*) — and refetch their own data. The framework never
 carries application data. Python >= 3.11, async-first, MIT-licensed,
-runtime dependencies: scramp and loguru only.
+runtime dependency: scramp only.
 
 Named `pgnudge` (v1.0.0): *pgqueuer moves work, pgnudge moves wakefulness.*
 
@@ -38,10 +38,9 @@ violating one, stop and ask the owner.
 4. **Driver-free.** The replication transport is a hand-rolled walsender
    client (`proto.py`, stdlib + scramp), because no Python library outside
    psycopg2 speaks the replication protocol (asyncpg issue #91 has been
-   open since 2017) and psycopg2 is vetoed. Runtime dependencies: scramp
-   plus loguru (owner-granted exception 2026-07-04, logging only — do not
-   read this as license for further dependencies). asyncpg exists solely
-   in the dev group for the live test's admin connection.
+   open since 2017) and psycopg2 is vetoed. Runtime dependency: scramp
+   only. asyncpg exists solely in the dev group for the live test's admin
+   connection.
 5. **From-connect-only.** No history, no backfill, no replay. Slots are
    created fresh at every (re)connect with `SNAPSHOT 'nothing'`; reconnect
    *resyncs*, never resumes. Missing changes while disconnected is a
@@ -117,8 +116,7 @@ src/pgnudge/
               liveness_timeout set (default 30s) every status requests a
               keepalive back, and inbound silence past the timeout aborts
               the socket to force a reconnect (never wait_for on reads).
-              Lifecycle logging via loguru (silence with
-              logger.disable("pgnudge")).
+              Lifecycle logging on the "pgnudge.wal" logger.
 tests/
   conftest.py  session-scoped PostgreSQL via testcontainers (pgqueuer
                pattern), scratch database per test, best-effort TLS enable
@@ -264,8 +262,6 @@ with nothing but psql —
 - **No module-level globals.** Constants live as class attributes
   (`ClassVar`); test config lives inside functions. (Owner rule 2026-07-03;
   stricter than pgqueuer's module-level constants — the stricter rule wins.)
-  The single sanctioned exception (owner, 2026-07-04): loguru's
-  `from loguru import logger` — that global IS the library's API.
 - **No leading-underscore prefixes on new names.** Python has no real
   public/private distinction; pick a descriptive name instead of hiding it
   behind a prefix. (Adopted from pgqueuer 2026-07-04 as the stricter rule —

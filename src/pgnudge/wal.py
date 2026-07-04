@@ -10,14 +10,13 @@ and an output plugin (wal2json or test_decoding).
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import re
 import secrets
 import ssl as ssl_module
 import time
 from typing import ClassVar
-
-from loguru import logger
 
 from pgnudge.engine import BaseFeed
 from pgnudge.proto import WalsenderConnection, XLogData
@@ -38,6 +37,8 @@ class WalFeed(BaseFeed):
     ``liveness_timeout`` (must exceed ``status_interval``; None disables)
     bounds how long the feed tolerates a silent server before reconnecting.
     """
+
+    log: ClassVar[logging.Logger] = logging.getLogger("pgnudge.wal")
 
     _TEST_DECODING_RE: ClassVar[re.Pattern[str]] = re.compile(
         r"^table (.+?): (?:INSERT|UPDATE|DELETE|TRUNCATE)"
@@ -148,10 +149,10 @@ class WalFeed(BaseFeed):
                     connect_timeout=self._connect_timeout,
                 )
             except Exception as exc:
-                logger.warning("connect to {}:{} failed: {}", self._host, self._port, exc)
+                self.log.warning("connect to %s:%d failed: %s", self._host, self._port, exc)
                 attempt += 1
                 delay = self._backoff_delay(attempt)
-                logger.debug("reconnect attempt {} in {:.2f}s", attempt, delay)
+                self.log.debug("reconnect attempt %d in %.2fs", attempt, delay)
                 await asyncio.sleep(delay)
                 continue
 
@@ -170,7 +171,7 @@ class WalFeed(BaseFeed):
                 self.slot_name = slot
                 attempt = 0
                 self._emit_resync("connected" if first else "reconnected")
-                logger.info("streaming from slot {} (backend pid {})", slot, conn.backend_pid)
+                self.log.info("streaming from slot %s (backend pid %s)", slot, conn.backend_pid)
                 first = False
 
                 self._last_lsn = 0
@@ -191,7 +192,7 @@ class WalFeed(BaseFeed):
                 raise
             except Exception as exc:
                 # fall through to reconnect with a fresh slot
-                logger.warning("stream error on slot {}, reconnecting: {}", slot, exc)
+                self.log.warning("stream error on slot %s, reconnecting: %s", slot, exc)
             finally:
                 if feedback is not None:
                     feedback.cancel()
@@ -205,7 +206,7 @@ class WalFeed(BaseFeed):
             if not self._closing:
                 attempt += 1
                 delay = self._backoff_delay(attempt)
-                logger.debug("reconnect attempt {} in {:.2f}s", attempt, delay)
+                self.log.debug("reconnect attempt %d in %.2fs", attempt, delay)
                 await asyncio.sleep(delay)
 
     async def _feedback_loop(self, conn: WalsenderConnection) -> None:
@@ -218,11 +219,11 @@ class WalFeed(BaseFeed):
             await asyncio.sleep(self._status_interval)
             idle = time.monotonic() - self.last_inbound
             if self.liveness_timeout is not None and idle > self.liveness_timeout:
-                logger.warning("no server traffic for {:.1f}s; aborting connection", idle)
+                self.log.warning("no server traffic for %.1fs; aborting connection", idle)
                 conn.abort()
                 return
             try:
                 await conn.send_standby_status(self._last_lsn, reply=probe)
             except Exception as exc:
-                logger.debug("standby status send failed: {}", exc)
+                self.log.debug("standby status send failed: %s", exc)
                 return
