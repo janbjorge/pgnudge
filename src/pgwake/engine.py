@@ -24,7 +24,6 @@ __all__ = ["Wakeup", "Intake", "Coalescer", "Debouncer", "Backoff", "FeedService
 class Wakeup:
     """One raw arrival from a transport, pre-coalescing."""
 
-    channel: str
     payload: str
     at: float  # time.time() of arrival
 
@@ -34,18 +33,15 @@ class Intake:
     """Bounded wakeup buffer; overflow is flagged, never blocks the producer."""
 
     maxsize: int
-    payload_filter: Callable[[str], bool] | None = None
     queue: asyncio.Queue[Wakeup] = field(init=False, repr=False)
     overflowed: bool = field(init=False, default=False)
 
     def __post_init__(self) -> None:
         self.queue = asyncio.Queue(maxsize=self.maxsize)
 
-    def push(self, channel: str, payload: str) -> None:
-        if self.payload_filter is not None and not self.payload_filter(payload):
-            return
+    def push(self, payload: str) -> None:
         try:
-            self.queue.put_nowait(Wakeup(channel=channel, payload=payload, at=time.time()))
+            self.queue.put_nowait(Wakeup(payload=payload, at=time.time()))
         except asyncio.QueueFull:
             self.overflowed = True
 
@@ -76,18 +72,17 @@ class Intake:
 
 @dataclass(slots=True)
 class Coalescer:
-    """Dedup buffer: one ``Event`` per (channel, payload), counting arrivals."""
+    """Dedup buffer: one ``Event`` per payload, counting arrivals."""
 
-    pending: dict[tuple[str, str], Event] = field(init=False, default_factory=dict)
+    pending: dict[str, Event] = field(init=False, default_factory=dict)
 
     def add(self, wakeup: Wakeup) -> None:
-        key = (wakeup.channel, wakeup.payload)
-        prev = self.pending.get(key)
+        prev = self.pending.get(wakeup.payload)
         if prev is None:
-            self.pending[key] = Event(channel=wakeup.channel, payload=wakeup.payload, first_seen=wakeup.at)
+            self.pending[wakeup.payload] = Event(payload=wakeup.payload, first_seen=wakeup.at)
         else:
-            self.pending[key] = Event(
-                channel=prev.channel, payload=prev.payload, first_seen=prev.first_seen, count=prev.count + 1
+            self.pending[wakeup.payload] = Event(
+                payload=prev.payload, first_seen=prev.first_seen, count=prev.count + 1
             )
 
     def flush(self) -> Batch:
@@ -156,8 +151,8 @@ class FeedService:
 
     # -- transport side --
 
-    def push(self, channel: str, payload: str) -> None:
-        self.intake.push(channel, payload)
+    def push(self, payload: str) -> None:
+        self.intake.push(payload)
 
     def emit(self, item: FeedItem) -> None:
         self.out.put_nowait(item)
@@ -217,10 +212,9 @@ class BaseFeed:
         failsafe: float | None = None,
         backoff: tuple[float, float] = (0.1, 5.0),
         raw_queue_size: int = 8192,
-        payload_filter: Callable[[str], bool] | None = None,
     ) -> None:
         self._service = FeedService(
-            intake=Intake(maxsize=raw_queue_size, payload_filter=payload_filter),
+            intake=Intake(maxsize=raw_queue_size),
             debouncer=Debouncer(
                 debounce=debounce,
                 max_batch_wait=max_batch_wait if max_batch_wait is not None else debounce * 20,
@@ -275,8 +269,8 @@ class BaseFeed:
     def _closing(self) -> bool:
         return self._service.closing
 
-    def _push_raw(self, channel: str, payload: str) -> None:
-        self._service.push(channel, payload)
+    def _push_raw(self, payload: str) -> None:
+        self._service.push(payload)
 
     def _emit_resync(self, reason: str) -> None:
         self._service.emit(Resync(reason))

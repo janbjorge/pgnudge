@@ -11,9 +11,8 @@ __all__ = ["Event", "Batch", "Resync", "FeedItem"]
 
 @dataclass(frozen=True, slots=True)
 class Event:
-    """One coalesced wakeup; ``count`` = arrivals of this (channel, payload) in the window."""
+    """One coalesced wakeup; ``count`` = arrivals of this payload in the window."""
 
-    channel: str
     payload: str
     first_seen: float  # time.time() of first arrival in this batch
     count: int = 1

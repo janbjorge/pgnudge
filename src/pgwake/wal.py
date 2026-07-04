@@ -14,7 +14,6 @@ import os
 import re
 import secrets
 import ssl as ssl_module
-from collections.abc import Callable
 from typing import ClassVar
 
 from pgwake.engine import BaseFeed
@@ -56,7 +55,6 @@ class WalFeed(BaseFeed):
         failsafe: float | None = None,
         backoff: tuple[float, float] = (0.1, 5.0),
         raw_queue_size: int = 8192,
-        payload_filter: Callable[[str], bool] | None = None,
     ) -> None:
         super().__init__(
             debounce=debounce,
@@ -64,7 +62,6 @@ class WalFeed(BaseFeed):
             failsafe=failsafe,
             backoff=backoff,
             raw_queue_size=raw_queue_size,
-            payload_filter=payload_filter,
         )
         if plugin not in ("wal2json", "test_decoding"):
             raise ValueError(f"unsupported plugin {plugin!r}")
@@ -168,7 +165,7 @@ class WalFeed(BaseFeed):
                     if isinstance(msg, XLogData):
                         self._last_lsn = max(self._last_lsn, msg.end_lsn)
                         for table in parse(msg.payload):
-                            self._push_raw("wal", table)
+                            self._push_raw(table)
                     elif isinstance(msg, Keepalive):
                         self._last_lsn = max(self._last_lsn, msg.end_lsn)
                         if msg.reply_requested:

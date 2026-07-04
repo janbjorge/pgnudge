@@ -98,8 +98,8 @@ src/pgwake/
               abort() = deliberate hard close.
   core.py     The contract only: Event/Batch/Resync dataclasses + FeedItem.
   engine.py   The machinery, one dataclass per concern, pure stdlib:
-              Intake (bounded wakeup buffer, payload_filter, overflow flag),
-              Coalescer (dedup buffer, count per (channel, payload)),
+              Intake (bounded wakeup buffer, overflow flag),
+              Coalescer (dedup buffer, count per payload),
               Debouncer (rolling window, hard max_batch_wait cap; overflow
               -> Resync("overflow")), Backoff (jittered exponential),
               FeedService (wires intake -> debouncer -> out queue, owns

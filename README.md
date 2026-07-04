@@ -84,7 +84,7 @@ A feed yields exactly two item types:
   reconnect, on internal queue overflow, and (optionally) on a failsafe
   interval. Handle `Resync` correctly and nothing can make your view wrong.
 - **`Batch(events)`** — one debounce window's worth of wakeups,
-  deduplicated, in arrival order. Each `Event` carries `channel`, `payload`
+  deduplicated, in arrival order. Each `Event` carries `payload`
   (`schema.table` — the stable v1 payload contract), `first_seen`, `count`.
 
 **Delivery is at-least-once wakeups, from the point of connect only.**

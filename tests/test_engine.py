@@ -8,8 +8,8 @@ from pgwake.core import Batch, Resync
 from pgwake.engine import Backoff, BaseFeed, Coalescer, Debouncer, FeedService, Intake, Wakeup
 
 
-def wakeup(payload: str, channel: str = "wal", at: float = 1.0) -> Wakeup:
-    return Wakeup(channel=channel, payload=payload, at=at)
+def wakeup(payload: str, at: float = 1.0) -> Wakeup:
+    return Wakeup(payload=payload, at=at)
 
 
 # -- Coalescer ----------------------------------------------------------------
@@ -33,13 +33,6 @@ def test_coalescer_keeps_arrival_order() -> None:
     assert c.flush().payloads() == ("b", "a", "c")
 
 
-def test_coalescer_distinguishes_channels() -> None:
-    c = Coalescer()
-    c.add(wakeup("t", channel="one"))
-    c.add(wakeup("t", channel="two"))
-    assert len(c.flush().events) == 2
-
-
 def test_coalescer_flush_resets() -> None:
     c = Coalescer()
     c.add(wakeup("t"))
@@ -52,24 +45,15 @@ def test_coalescer_flush_resets() -> None:
 
 async def test_intake_push_get_roundtrip() -> None:
     intake = Intake(maxsize=4)
-    intake.push("wal", "public.picks")
-    got = await intake.get()
-    assert (got.channel, got.payload) == ("wal", "public.picks")
-
-
-async def test_intake_payload_filter_drops() -> None:
-    intake = Intake(maxsize=4, payload_filter=lambda p: p.startswith("public."))
-    intake.push("wal", "internal.audit")
-    intake.push("wal", "public.picks")
+    intake.push("public.picks")
     got = await intake.get()
     assert got.payload == "public.picks"
-    assert await intake.get_within(0.05) is None
 
 
 async def test_intake_overflow_flags_and_drains() -> None:
     intake = Intake(maxsize=2)
     for _ in range(3):
-        intake.push("wal", "t")
+        intake.push("t")
     assert intake.consume_overflow() is True  # flagged, queue drained
     assert await intake.get_within(0.05) is None
     assert intake.consume_overflow() is False  # cleared by the consume
@@ -86,8 +70,8 @@ async def test_intake_get_within_times_out() -> None:
 async def test_debouncer_emits_batch_after_quiet_period() -> None:
     intake = Intake(maxsize=64)
     deb = Debouncer(debounce=0.05, max_batch_wait=1.0)
-    intake.push("wal", "public.picks")
-    intake.push("wal", "public.picks")
+    intake.push("public.picks")
+    intake.push("public.picks")
     item = await asyncio.wait_for(deb.next_item(intake), 1.0)
     assert isinstance(item, Batch)
     assert item.payloads() == ("public.picks",)
@@ -97,8 +81,8 @@ async def test_debouncer_emits_batch_after_quiet_period() -> None:
 async def test_debouncer_overflow_yields_resync() -> None:
     intake = Intake(maxsize=1)
     deb = Debouncer(debounce=0.05, max_batch_wait=1.0)
-    intake.push("wal", "t")
-    intake.push("wal", "t")  # overflows
+    intake.push("t")
+    intake.push("t")  # overflows
     item = await asyncio.wait_for(deb.next_item(intake), 1.0)
     assert item == Resync("overflow")
 
@@ -109,7 +93,7 @@ async def test_debouncer_hard_deadline_caps_rolling_window() -> None:
 
     async def firehose() -> None:
         while True:
-            intake.push("wal", "t")
+            intake.push("t")
             await asyncio.sleep(0.02)  # always inside the rolling debounce
 
     pump = asyncio.create_task(firehose())
@@ -154,8 +138,8 @@ async def test_service_pumps_pushes_into_batches() -> None:
 
     async def transport() -> None:
         svc.emit(Resync("connected"))
-        svc.push("wal", "public.picks")
-        svc.push("wal", "public.picks")
+        svc.push("public.picks")
+        svc.push("public.picks")
         await asyncio.sleep(3600)
 
     svc.start(transport, name="test")
@@ -208,7 +192,7 @@ class FakeFeed(BaseFeed):
     async def _supervisor(self) -> None:
         self._emit_resync("connected")
         for _ in range(5):
-            self._push_raw("wal", "public.picks")
+            self._push_raw("public.picks")
         await asyncio.sleep(3600)
 
     async def _extra_close(self) -> None:

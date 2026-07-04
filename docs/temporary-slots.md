@@ -190,7 +190,7 @@ requirement, take the other side of the trade:
   `wal_sender_timeout` (default 60 s) or the server will kill the session as
   unresponsive.
 - Grant `REPLICATION` to a dedicated role: logical decoding sees every
-  table in the database, regardless of the payload filter.
+  table in the database, regardless of any `tables` filter.
 
 ## Sources
 
