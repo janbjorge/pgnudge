@@ -7,7 +7,6 @@ that ``BaseFeed`` exposes.
 """
 
 import asyncio
-import contextlib
 import random
 import time
 from collections.abc import AsyncIterator, Callable, Coroutine
@@ -178,15 +177,17 @@ class FeedService:
         self.closing = True
         for t in self.tasks:
             t.cancel()
-        for t in self.tasks:
-            with contextlib.suppress(asyncio.CancelledError):
-                await t
+        # gather, not per-task await: a task that died with a real exception
+        # must not abort shutdown before the sentinel is queued
+        await asyncio.gather(*self.tasks, return_exceptions=True)
         self.out.put_nowait(None)
 
     # -- consumer side --
 
     async def next_item(self) -> FeedItem | None:
-        """Next item, or ``None`` once closed."""
+        """Next item, or ``None`` once closed and drained."""
+        if self.closing and self.out.empty():
+            return None
         return await self.out.get()
 
     # -- internal loops --

@@ -211,6 +211,18 @@ async def test_service_close_yields_none_and_is_idempotent() -> None:
     assert await asyncio.wait_for(svc.next_item(), 1.0) is None
 
 
+async def test_service_aclose_survives_crashed_task() -> None:
+    svc = service()
+
+    async def transport() -> None:
+        raise RuntimeError("supervisor died")
+
+    svc.start(transport, name="test")
+    await asyncio.sleep(0.01)  # let the crash land before shutdown
+    await svc.aclose()  # must not re-raise; the sentinel must still be queued
+    assert await asyncio.wait_for(svc.next_item(), 1.0) is None
+
+
 # -- BaseFeed ---------------------------------------------------------------------
 
 
@@ -241,6 +253,15 @@ async def test_basefeed_iterates_resync_then_batch_and_closes() -> None:
     assert feed.closes == 1
     with pytest.raises(StopAsyncIteration):
         await asyncio.wait_for(anext(feed), 1.0)
+
+
+async def test_basefeed_anext_after_close_raises_every_time() -> None:
+    feed = FakeFeed()
+    async with feed:
+        await asyncio.wait_for(anext(feed), 1.0)
+    for _ in range(2):  # second round has no sentinel left; must not hang
+        with pytest.raises(StopAsyncIteration):
+            await asyncio.wait_for(anext(feed), 1.0)
 
 
 async def test_basefeed_aclose_is_idempotent() -> None:
