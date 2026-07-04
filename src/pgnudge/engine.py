@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from types import TracebackType
 from typing import Self
 
-from pgwake.core import Batch, Event, FeedItem, Resync
+from pgnudge.core import Batch, Event, FeedItem, Resync
 
 __all__ = ["Wakeup", "Intake", "Coalescer", "Debouncer", "Backoff", "FeedService", "BaseFeed"]
 

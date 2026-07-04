@@ -1,6 +1,6 @@
 """WalFeed: logical decoding from a TEMPORARY replication slot.
 
-The slot auto-drops when the session ends, cleanly or not — nothing pgwake
+The slot auto-drops when the session ends, cleanly or not — nothing pgnudge
 creates outlives the connection. From-connect-only: a fresh slot per
 (re)connect, no history, no backfill. Semantics and the gap-free handshake
 argument: README. Server needs ``wal_level=logical``, a REPLICATION role,
@@ -16,8 +16,8 @@ import secrets
 import ssl as ssl_module
 from typing import ClassVar
 
-from pgwake.engine import BaseFeed
-from pgwake.proto import WalsenderConnection, XLogData
+from pgnudge.engine import BaseFeed
+from pgnudge.proto import WalsenderConnection, XLogData
 
 __all__ = ["WalFeed"]
 
@@ -47,7 +47,7 @@ class WalFeed(BaseFeed):
         ssl: bool | ssl_module.SSLContext = False,
         tables: list[str] | None = None,
         plugin: str = "wal2json",
-        application_name: str = "pgwake",
+        application_name: str = "pgnudge",
         status_interval: float = 10.0,
         connect_timeout: float = 10.0,
         debounce: float = 0.05,
@@ -143,7 +143,7 @@ class WalFeed(BaseFeed):
 
             self._conn = conn
             self.connection_pid = conn.backend_pid
-            slot = f"pgwake_{os.getpid()}_{secrets.token_hex(3)}"
+            slot = f"pgnudge_{os.getpid()}_{secrets.token_hex(3)}"
             feedback: asyncio.Task[None] | None = None
             try:
                 await conn.simple_query(

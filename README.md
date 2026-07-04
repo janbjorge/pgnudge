@@ -1,30 +1,30 @@
-# pgwake
+# pgnudge
 
 **Push-only change nudges from PostgreSQL — nothing left behind on the server.**
 
-[![CI](https://github.com/janbjorge/pgwake/actions/workflows/ci.yml/badge.svg)](https://github.com/janbjorge/pgwake/actions/workflows/ci.yml)
-[![PyPI](https://img.shields.io/pypi/v/pgwake)](https://pypi.org/project/pgwake/)
-[![Python](https://img.shields.io/badge/python-3.13%2B-blue)](https://pypi.org/project/pgwake/)
+[![CI](https://github.com/janbjorge/pgnudge/actions/workflows/ci.yml/badge.svg)](https://github.com/janbjorge/pgnudge/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/pgnudge)](https://pypi.org/project/pgnudge/)
+[![Python](https://img.shields.io/badge/python-3.13%2B-blue)](https://pypi.org/project/pgnudge/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-Your database moves; your app wakes up. pgwake tells you *that* something
+Your database moves; your app wakes up. pgnudge tells you *that* something
 changed and *which tables* — you already know how to load the data. Built
 for live read models: dashboards, cache invalidation, anything that
 renders a query and wants to re-render the instant the database moves.
 
 ```
-pip install pgwake
+pip install pgnudge
 ```
 
 Python ≥ 3.13, PostgreSQL ≥ 16. One dependency:
 [scramp](https://github.com/tlocke/scramp) (pure-Python SCRAM auth). No
-database driver — pgwake speaks the PostgreSQL replication protocol
+database driver — pgnudge speaks the PostgreSQL replication protocol
 itself.
 
 ## Sixty-second tour
 
 ```python
-from pgwake import Batch, Resync, WalFeed
+from pgnudge import Batch, Resync, WalFeed
 
 async with WalFeed(
     host="db.example.com", user="wal_user", password=...,
@@ -41,7 +41,7 @@ async with WalFeed(
 ```
 
 There is no step 1. Nothing to install in the database, nothing to migrate,
-nothing to revert. Close the connection and the server forgets pgwake ever
+nothing to revert. Close the connection and the server forgets pgnudge ever
 existed.
 
 ## The guarantee
@@ -73,7 +73,7 @@ preinstalled on Azure Flexible Server, RDS, and most managed platforms) or
 `test_decoding` (ships inside PostgreSQL itself).
 
 The full mechanics — logical decoding, temporary-slot semantics, the
-gap-free handshake argument, and **when not to use pgwake** — are in
+gap-free handshake argument, and **when not to use pgnudge** — are in
 [docs/temporary-slots.md](docs/temporary-slots.md).
 
 ## The contract
@@ -109,7 +109,7 @@ table is one `Event`, `count=500`, one wakeup, one refetch.
 
 `NOTIFY` doesn't fire itself: making it track data changes means triggers,
 and triggers are persistent catalog objects — schema footprint, migration
-reviews, cleanup jobs, drift. pgwake's whole premise is refusing that
+reviews, cleanup jobs, drift. pgnudge's whole premise is refusing that
 trade. Logical decoding gets the same wakeups straight from the WAL with
 zero objects. (LISTEN is still great on the *consuming* side — see Fan-out.)
 
@@ -154,8 +154,8 @@ uv sync && uv run pytest
 
 - **Not a queue.** No durability, no competing consumers, no retries. If a
   message must be processed, use a job queue
-  (e.g. [pgqueuer](https://github.com/janbjorge/pgqueuer)) — pgwake is its
-  broadcast-shaped sibling: pgqueuer moves *work*, pgwake moves
+  (e.g. [pgqueuer](https://github.com/janbjorge/pgqueuer)) — pgnudge is its
+  broadcast-shaped sibling: pgqueuer moves *work*, pgnudge moves
   *wakefulness*.
 - **Not CDC.** No row images, no before/after, no replay. Refetch.
 - **Not a driver.** The protocol client implements exactly what a

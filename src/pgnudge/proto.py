@@ -81,7 +81,7 @@ class WalsenderConnection:
         database: str,
         password: str | None = None,
         ssl: bool | ssl_module.SSLContext = False,
-        application_name: str = "pgwake",
+        application_name: str = "pgnudge",
         connect_timeout: float = 10.0,
     ) -> Self:
         reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), connect_timeout)
@@ -147,7 +147,7 @@ class WalsenderConnection:
                     assert scram is not None
                     scram.set_server_final(mbody[4:].decode())
                 else:
-                    raise PgServerError({"M": f"unsupported authentication request (code {code}); pgwake speaks trust, cleartext and SCRAM-SHA-256"})
+                    raise PgServerError({"M": f"unsupported authentication request (code {code}); pgnudge speaks trust, cleartext and SCRAM-SHA-256"})
             elif mtype == b"E":
                 raise PgServerError(_parse_error(mbody))
             else:  # NoticeResponse etc.

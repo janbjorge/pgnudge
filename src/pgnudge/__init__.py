@@ -1,8 +1,8 @@
 """Push-only change nudges from PostgreSQL; nothing on the server outlives the connection."""
 
-from pgwake.core import Batch, Event, FeedItem, Resync
-from pgwake.proto import PgServerError
-from pgwake.wal import WalFeed
+from pgnudge.core import Batch, Event, FeedItem, Resync
+from pgnudge.proto import PgServerError
+from pgnudge.wal import WalFeed
 
 __version__ = "1.0.0"
 

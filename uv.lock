@@ -363,7 +363,7 @@ wheels = [
 ]
 
 [[package]]
-name = "pgwake"
+name = "pgnudge"
 version = "1.0.0"
 source = { editable = "." }
 dependencies = [

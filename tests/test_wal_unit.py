@@ -21,8 +21,8 @@ from wire import (
     xlog_data,
 )
 
-from pgwake import Batch, Resync, WalFeed
-from pgwake.proto import WalsenderConnection
+from pgnudge import Batch, Resync, WalFeed
+from pgnudge.proto import WalsenderConnection
 
 
 def wal_feed(port: int, *, plugin: str = "wal2json", status_interval: float = 10.0) -> WalFeed:
@@ -107,7 +107,7 @@ async def test_extra_close_aborts_and_clears_connection() -> None:
     def attach(feed: WalFeed, conn: WalsenderConnection) -> None:
         # in a helper so mypy's attribute narrowing doesn't outlive the call
         feed._conn = conn
-        feed.slot_name = "pgwake_x"
+        feed.slot_name = "pgnudge_x"
 
     async with scripted_server(handler) as (host, port):
         conn = await WalsenderConnection.connect(host=host, port=port, user="u", database="d")
@@ -238,7 +238,7 @@ async def test_walfeed_lifecycle_against_scripted_walsender() -> None:
             assert await asyncio.wait_for(anext(feed), 2.0) == Resync("connected")
             assert feed.connection_pid == 1001
             first_slot = feed.slot_name
-            assert first_slot is not None and first_slot.startswith("pgwake_")
+            assert first_slot is not None and first_slot.startswith("pgnudge_")
 
             batch = await asyncio.wait_for(anext(feed), 2.0)
             assert isinstance(batch, Batch)

@@ -1,13 +1,13 @@
 # AGENTS.md — Guidance for AI Code-Generation Agents
 
-pgwake is a Python framework for **push-only change nudges from PostgreSQL
+pgnudge is a Python framework for **push-only change nudges from PostgreSQL
 with zero server footprint**. Consumers get an async iterator of two item
 types — `Resync` (reload everything) and `Batch` (coalesced wakeups saying
 *which tables moved*) — and refetch their own data. The framework never
 carries application data. Python >= 3.13, async-first, MIT-licensed,
 runtime dependency: scramp only.
 
-Named `pgwake` (v1.0.0): *pgqueuer moves work, pgwake moves wakefulness.*
+Named `pgnudge` (v1.0.0): *pgqueuer moves work, pgnudge moves wakefulness.*
 
 Read this file fully before changing anything. The full design history is
 deliberately not in this repo (`docs/` holds only the public
@@ -71,14 +71,14 @@ violating one, stop and ask the owner.
   violate law 3; fan-out goes through the bridge daemon.
 - **Reintroduce a NOTIFY consumer.** There was a second transport,
   `ChangeFeed` (NOTIFY consumer on asyncpg); the owner had it removed
-  2026-07-03. pgwake is WalFeed-only. Fan-out is a bridge daemon
+  2026-07-03. pgnudge is WalFeed-only. Fan-out is a bridge daemon
   republishing via `pg_notify`; consumers LISTEN with whatever driver they
   already have.
 
 ## Project Structure
 
 ```
-src/pgwake/
+src/pgnudge/
   proto.py    WalsenderConnection: the protocol client (~240 lines, stdlib
               asyncio + scramp only). Startup with replication=database,
               optional TLS via StreamWriter.start_tls, auth = trust /
@@ -103,7 +103,7 @@ src/pgwake/
               facade; subclass hooks _supervisor/_extra_close). Unit-tested
               without PostgreSQL in tests/test_engine.py.
   wal.py      WalFeed(BaseFeed): the transport. Supervisor creates a fresh
-              TEMPORARY slot per (re)connect (name: pgwake_<pid>_<hex>),
+              TEMPORARY slot per (re)connect (name: pgnudge_<pid>_<hex>),
               SNAPSHOT 'nothing', starts replication at 0/0, emits Resync
               only once the stream is live (this ordering is the gap-free
               handshake argument — see README), parses wal2json
@@ -115,8 +115,8 @@ tests/
   conftest.py  session-scoped PostgreSQL via testcontainers (pgqueuer
                pattern), scratch database per test, best-effort TLS enable
                (self-signed cert) inside the container. Env knobs:
-               EXTERNAL_POSTGRES_DSN, POSTGRES_IMAGE, PGWAKE_PLUGIN,
-               PGWAKE_TLS.
+               EXTERNAL_POSTGRES_DSN, POSTGRES_IMAGE, PGNUDGE_PLUGIN,
+               PGNUDGE_TLS.
   test_engine.py  unit tests for the engine classes (Intake, Coalescer,
                Debouncer, Backoff, FeedService, BaseFeed via a FakeFeed) —
                pure asyncio, no PostgreSQL.
@@ -139,8 +139,8 @@ tests/
 docs/
   temporary-slots.md  public reference (added 2026-07-04): logical decoding
                + temporary-slot mechanics in PostgreSQL's own terms, the
-               gap-free handshake, polling vs pgwake, when NOT to use
-               pgwake, operational limits. Reference material only — not
+               gap-free handshake, polling vs pgnudge, when NOT to use
+               pgnudge, operational limits. Reference material only — not
                a design-history document.
 examples/
   minimal.py   smallest end-to-end consumer: WalFeed + match on Resync/Batch.
@@ -177,7 +177,7 @@ uv run pytest tests/test_wal.py::test_hard_abort_leaves_no_slots
 
 # Coverage (100% line+branch as of 2026-07-04; keep it there.
 # CI gate is 98 — headroom for best-effort TLS lines)
-uv run pytest --cov=pgwake --cov-report=term-missing
+uv run pytest --cov=pgnudge --cov-report=term-missing
 
 # Lint + typecheck (both must stay clean)
 uv run ruff check . && uv run mypy
@@ -190,13 +190,13 @@ uv build
 The test suite owns its own PostgreSQL via testcontainers — nothing to
 install beyond Docker. Against an external server instead:
 `EXTERNAL_POSTGRES_DSN=postgresql://... uv run pytest` (role needs
-CREATEDB + REPLICATION; add `PGWAKE_TLS=1` if it has TLS). Default plugin
-is `test_decoding` (zero-install); `PGWAKE_PLUGIN=wal2json` needs an image
+CREATEDB + REPLICATION; add `PGNUDGE_TLS=1` if it has TLS). Default plugin
+is `test_decoding` (zero-install); `PGNUDGE_PLUGIN=wal2json` needs an image
 that ships it — **no public image does for PG 16** (debezium/postgres
 dropped wal2json; proven missing 2026-07-04, error 58P01). Build one:
 `postgres:16` + apt `postgresql-16-wal2json` from the PGDG repo the
 official image already has configured — see the docker build step in
-`ci.yml`, then `POSTGRES_IMAGE=pgwake-wal2json:16`.
+`ci.yml`, then `POSTGRES_IMAGE=pgnudge-wal2json:16`.
 
 Debugging trick from the PG docs: a replication connection can be tested
 with nothing but psql —
@@ -215,9 +215,9 @@ with nothing but psql —
 
 1. Standard library
 2. Third-party packages (scramp; asyncpg/pytest/testcontainers in tests)
-3. Internal imports using absolute paths (`from pgwake.core import Batch`)
+3. Internal imports using absolute paths (`from pgnudge.core import Batch`)
 
-- **No `from __future__ import annotations`.** pgwake targets Python >= 3.13;
+- **No `from __future__ import annotations`.** pgnudge targets Python >= 3.13;
   modern syntax is used directly (PEP 695 `type` aliases and generics,
   `Self`, `collections.abc` imports). This deliberately deviates from
   pgqueuer, which supports 3.10.
@@ -234,7 +234,7 @@ with nothing but psql —
   exceptions — not even at protocol boundaries. Use proper types, generics,
   protocols, or `object` instead. (Stricter than pgqueuer's
   driver-boundary carve-out; the stricter rule wins.)
-- **No `# type: ignore` in production code** (`src/pgwake/`). Fix the
+- **No `# type: ignore` in production code** (`src/pgnudge/`). Fix the
   underlying type issue instead. In tests it is acceptable only with an
   error code (`ignore-without-code` is enforced).
 - **Generic constructors over type-annotated assignments**:
@@ -257,7 +257,7 @@ with nothing but psql —
 - **No leading-underscore prefixes on new names.** Python has no real
   public/private distinction; pick a descriptive name instead of hiding it
   behind a prefix. (Adopted from pgqueuer 2026-07-04 as the stricter rule —
-  it supersedes the earlier pgwake carve-out that kept single underscores
+  it supersedes the earlier pgnudge carve-out that kept single underscores
   on plain-class instance attributes and helpers.) Existing `_`-prefixed
   internals in `proto.py`/`engine.py`/`wal.py` predate this; renaming them
   is a pending refactor — coordinate with the owner before a mass rename,
@@ -347,7 +347,7 @@ in their docstring), banner section headers beyond the existing light
 
 ## Versioning
 
-pgwake follows **strict semantic versioning** (SemVer) from v1.0.0 onward:
+pgnudge follows **strict semantic versioning** (SemVer) from v1.0.0 onward:
 
 - **Patch** (1.0.x): bug fixes only, no API changes.
 - **Minor** (1.x.0): new features, fully backward-compatible.
@@ -377,7 +377,7 @@ This project follows
   `refactor!: drop Event.channel ...`)
 - Body: present tense, wrap at 72 characters. Explain **why**, not just
   what. Footer `BREAKING CHANGE: <description>` for breaking changes.
-- No PR-number suffix — pgwake has no PR-based flow today; if one appears,
+- No PR-number suffix — pgnudge has no PR-based flow today; if one appears,
   adopt pgqueuer's `(#{PR_ID})` suffix.
 
 ## CI Matrix
@@ -408,11 +408,11 @@ workflow itself.
 
 ## Backlog, priority order
 
-0. **Rename — DONE** (`pgnudge` → `pgwake`, 2026-07-03, owner's choice).
+0. **Rename — DONE** (`pgnudge` → `pgnudge`, 2026-07-03, owner's choice).
    Runners-up preserved in case of a future collision, PyPI-verified free
    at the time: `waltail`, `pgripple`, `pgnudge`, `pgwisp`, `pgghost`,
    `pgfollow`, `pgblip`, `pgwhisper`, `pgpulse`, `pgbeacon`, `pgfeed`
-   (`pgtail`, `pgflux`, `pglive` were taken). The PyPI name `pgwake` is
+   (`pgtail`, `pgflux`, `pglive` were taken). The PyPI name `pgnudge` is
    **not yet registered** — claiming it with the first release is the real
    Task 0 remainder.
 1. ~~pytest-ify~~ — DONE 2026-07-03: testcontainers session fixture,
@@ -420,7 +420,7 @@ workflow itself.
 2. ~~CI~~ — DONE 2026-07-03: `.github/workflows/ci.yml`, Python 3.13/3.14 ×
    PG 16–18 (test_decoding; floor is PG 16+, owner call 2026-07-03) + one
    wal2json job on a CI-built image.
-   Repo pushed to github.com/janbjorge/pgwake 2026-07-03 — check Actions
+   Repo pushed to github.com/janbjorge/pgnudge 2026-07-03 — check Actions
    for the first real runs.
 3. **Bridge daemon** as a first-class example or subpackage: one WalFeed ->
    `pg_notify` on a channel -> plain LISTEN consumers. Zero persistent

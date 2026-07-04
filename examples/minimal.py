@@ -1,6 +1,6 @@
-"""Minimal end-to-end pgwake example (see README for server config)."""
+"""Minimal end-to-end pgnudge example (see README for server config)."""
 import asyncio
-from pgwake import Batch, Resync, WalFeed
+from pgnudge import Batch, Resync, WalFeed
 
 async def main() -> None:
     async with WalFeed(

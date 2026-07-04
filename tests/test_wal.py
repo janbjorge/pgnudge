@@ -7,7 +7,7 @@ import asyncpg
 import pytest
 from conftest import PgParams
 
-from pgwake import Batch, Resync, WalFeed
+from pgnudge import Batch, Resync, WalFeed
 
 
 def wal_feed(

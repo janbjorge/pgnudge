@@ -1,6 +1,6 @@
 # Logical decoding & `TEMPORARY` replication slots
 
-pgwake turns PostgreSQL's write-ahead log into wakeups. The mechanism is
+pgnudge turns PostgreSQL's write-ahead log into wakeups. The mechanism is
 logical decoding over the streaming-replication protocol; the primitive that
 makes it zero-footprint is the **temporary replication slot**. This page lays
 out the machinery in PostgreSQL's own terms, the guarantees that fall out of
@@ -15,7 +15,7 @@ plugin* which formats it into messages.[^1] Nothing extra runs at write time —
 no trigger fires, no row is queued, no table grows. The decoding cost lives on
 the replication connection, not inside your transactions.
 
-That is the whole trick: the change feed already exists. pgwake just asks the
+That is the whole trick: the change feed already exists. pgnudge just asks the
 server to replay it, live, in a throwaway session.
 
 ## Replication slots — and why the normal kind is a liability
@@ -45,11 +45,11 @@ The replication protocol offers one variant with the opposite lifetime:
 
 Slot lifetime **is** session lifetime, enforced by the server. Clean close,
 crash, `kill -9`, yanked cable, `pg_terminate_backend` — same cleanup path,
-no cleanup code. A disconnected pgwake consumer holds *nothing*: no WAL
+no cleanup code. A disconnected pgnudge consumer holds *nothing*: no WAL
 retention, no catalog object, no disk.
 
 The trade is that no bookmark survives disconnection, so there is no resume
-and no replay. pgwake treats that as the design, not the bug: every
+and no replay. pgnudge treats that as the design, not the bug: every
 (re)connect creates a fresh slot and emits `Resync` — the consumer refetches
 its data, and the database it refetches from is the source of truth.
 
@@ -60,7 +60,7 @@ protocol[^3] directly (stdlib asyncio + scramp; no driver):
 
 ```
 startup    replication=database            (TLS, SCRAM-SHA-256)
-Q          CREATE_REPLICATION_SLOT "pgwake_<pid>_<hex>"
+Q          CREATE_REPLICATION_SLOT "pgnudge_<pid>_<hex>"
              TEMPORARY LOGICAL wal2json (SNAPSHOT 'nothing')
 Q          START_REPLICATION SLOT "…" LOGICAL 0/0 (…plugin options…)
 W          CopyBothResponse                — stream is live
@@ -105,12 +105,12 @@ Payloads are identities (`schema.table`), not data, so identical payloads
 inside one debounce window collapse into a single `Event` with a `count`. A
 500-row transaction on one table is one wakeup and one refetch. Backpressure
 degrades in the same direction: if the consumer falls behind and the intake
-buffer overflows, pgwake drops the buffered hints and emits
+buffer overflows, pgnudge drops the buffered hints and emits
 `Resync("overflow")` — coarser, never wrong.
 
-## Polling vs. pgwake
+## Polling vs. pgnudge
 
-The pattern pgwake replaces — ask on a timer, whether or not anything
+The pattern pgnudge replaces — ask on a timer, whether or not anything
 changed:
 
 ```python
@@ -124,7 +124,7 @@ async def watch(pool: asyncpg.Pool) -> None:
         await asyncio.sleep(2.0)
 ```
 
-The same consumer on pgwake — sleep until the database says something moved:
+The same consumer on pgnudge — sleep until the database says something moved:
 
 ```python
 async with WalFeed(..., tables=["public.orders"]) as feed:
@@ -135,7 +135,7 @@ async with WalFeed(..., tables=["public.orders"]) as feed:
 What changes:
 
 ```
-                     poll every 2 s                pgwake
+                     poll every 2 s                pgnudge
  ─────────────────────────────────────────────────────────────────────
  change → wakeup     0–2 s (interval floor)        ~debounce (50 ms)
  idle cost           1 query / interval / watcher  0 queries; 1 idle
@@ -150,23 +150,23 @@ What changes:
 Polling still has real virtues: it is trivial to reason about, works
 through connection poolers, and needs no grants beyond SELECT. If a
 2-second staleness floor and the idle query load are acceptable for your
-case, polling is a fine answer — pgwake is for when they aren't.
+case, polling is a fine answer — pgnudge is for when they aren't.
 
-## When you should NOT use pgwake
+## When you should NOT use pgnudge
 
-pgwake trades completeness for zero footprint. When completeness is the
+pgnudge trades completeness for zero footprint. When completeness is the
 requirement, take the other side of the trade:
 
-- **Every change must be processed.** pgwake misses events while disconnected
+- **Every change must be processed.** pgnudge misses events while disconnected
   *by design*. If missing one is unacceptable, you need a persistent slot —
   that is CDC (Debezium, or a hand-rolled persistent-slot consumer), not
-  pgwake.
+  pgnudge.
 - **You need the row data.** Payloads carry identity only, no before/after
   images. Building an audit trail, replicating to another store, computing
   diffs — CDC.
 - **A message must be processed exactly once, with retries and competing
   consumers.** That is a job queue. Use
-  [pgqueuer](https://github.com/janbjorge/pgqueuer) — pgwake is its
+  [pgqueuer](https://github.com/janbjorge/pgqueuer) — pgnudge is its
   broadcast-shaped sibling, and broadcast has no delivery ledger.
 - **Many consumers, directly attached.** Each feed holds one walsender + one
   slot against `max_wal_senders` / `max_replication_slots`, and each decodes
@@ -176,7 +176,7 @@ requirement, take the other side of the trade:
 - **You can't get the server config.** Logical decoding needs
   `wal_level = logical` (restart), a role with `REPLICATION`, and a direct
   connection — replication traffic bypasses connection poolers such as
-  PgBouncer. If any of those are off the table, so is pgwake.
+  PgBouncer. If any of those are off the table, so is pgnudge.
 - **Sub-debounce latency or strict ordering.** Wakeups are debounced,
   coalesced hints in arrival order — not an ordered event log. If consumers
   must observe individual changes in commit order, decode the stream

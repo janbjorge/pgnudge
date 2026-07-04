@@ -4,8 +4,8 @@ import asyncio
 
 import pytest
 
-from pgwake.core import Batch, Resync
-from pgwake.engine import Backoff, BaseFeed, Coalescer, Debouncer, FeedService, Intake, Wakeup
+from pgnudge.core import Batch, Resync
+from pgnudge.engine import Backoff, BaseFeed, Coalescer, Debouncer, FeedService, Intake, Wakeup
 
 
 def wakeup(payload: str, at: float = 1.0) -> Wakeup:

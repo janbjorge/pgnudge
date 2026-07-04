@@ -1,9 +1,9 @@
 """Session-scoped PostgreSQL via testcontainers; one scratch database per test.
 
 Env knobs: EXTERNAL_POSTGRES_DSN (skip the container), POSTGRES_IMAGE
-(default postgres:17), PGWAKE_PLUGIN (test_decoding default | wal2json —
+(default postgres:17), PGNUDGE_PLUGIN (test_decoding default | wal2json —
 needs an image that ships it; no public one does for PG 16, build your own:
-postgres:16 + apt postgresql-16-wal2json, see ci.yml), PGWAKE_TLS=1
+postgres:16 + apt postgresql-16-wal2json, see ci.yml), PGNUDGE_TLS=1
 (external server has TLS).
 """
 
@@ -54,7 +54,7 @@ def _enable_tls(container: PostgresContainer) -> bool:
 def postgres() -> Iterator[tuple[str, bool]]:
     """Yields (dsn, tls_available) for the session's server."""
     if external := os.environ.get("EXTERNAL_POSTGRES_DSN"):
-        yield external, os.environ.get("PGWAKE_TLS") == "1"
+        yield external, os.environ.get("PGNUDGE_TLS") == "1"
         return
 
     image = os.environ.get("POSTGRES_IMAGE", "postgres:17")
@@ -68,7 +68,7 @@ def postgres() -> Iterator[tuple[str, bool]]:
 async def pg(postgres: tuple[str, bool]) -> AsyncGenerator[PgParams]:
     base_dsn, tls_available = postgres
     parsed = urlparse(base_dsn)
-    scratch = f"pgwake_test_{uuid.uuid4().hex[:12]}"
+    scratch = f"pgnudge_test_{uuid.uuid4().hex[:12]}"
 
     admin = await asyncpg.connect(base_dsn)
     try:
@@ -82,7 +82,7 @@ async def pg(postgres: tuple[str, bool]) -> AsyncGenerator[PgParams]:
         user=parsed.username or "postgres",
         password=parsed.password,
         database=scratch,
-        plugin=os.environ.get("PGWAKE_PLUGIN", "test_decoding"),
+        plugin=os.environ.get("PGNUDGE_PLUGIN", "test_decoding"),
         tls_available=tls_available,
     )
 

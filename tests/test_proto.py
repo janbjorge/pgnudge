@@ -26,8 +26,8 @@ from wire import (
     xlog_data,
 )
 
-from pgwake import proto
-from pgwake.proto import Keepalive, PgServerError, WalsenderConnection, XLogData
+from pgnudge import proto
+from pgnudge.proto import Keepalive, PgServerError, WalsenderConnection, XLogData
 
 
 async def connect(
@@ -71,7 +71,7 @@ async def test_startup_requests_replication_database_mode() -> None:
     assert seen["replication"] == "database"
     assert seen["user"] == "alice"
     assert seen["database"] == "db"
-    assert seen["application_name"] == "pgwake"
+    assert seen["application_name"] == "pgnudge"
     assert conn.backend_pid == 7
 
 
