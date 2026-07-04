@@ -145,7 +145,9 @@ temp slot dies with the bridge.
   restart (once); grant `REPLICATION` to a dedicated role rather than
   widening an app role — logical decoding sees the whole database's stream.
 - TLS: `ssl=True` uses platform CA verification; pass an `ssl.SSLContext`
-  for custom trust. SCRAM-SHA-256 and cleartext auth are supported.
+  for custom trust. SCRAM-SHA-256 is supported everywhere; cleartext auth
+  only over TLS — pgnudge refuses to send a password on an unencrypted
+  connection.
 - Logging: the `pgnudge.wal` logger (stdlib `logging`, no handlers
   configured by the library) reports connect failures and stream errors at
   WARNING, successful (re)connects at INFO, and backoff timing at DEBUG —

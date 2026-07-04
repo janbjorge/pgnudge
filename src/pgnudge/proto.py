@@ -64,9 +64,12 @@ class WalsenderConnection:
     _SSL_REQUEST: ClassVar[int] = 80877103
     _PG_EPOCH_UNIX: ClassVar[int] = 946_684_800  # 2000-01-01 00:00:00 UTC
 
-    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    def __init__(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, *, tls: bool = False
+    ) -> None:
         self._reader = reader
         self._writer = writer
+        self.tls = tls
         self.backend_pid: int | None = None
 
     # -- connection & auth ----------------------------------------------------
@@ -94,7 +97,7 @@ class WalsenderConnection:
                 raise ConnectionError("server refused SSL")
             ctx = ssl if isinstance(ssl, ssl_module.SSLContext) else _default_ssl_context()
             await writer.start_tls(ctx, server_hostname=host)
-        conn = cls(reader, writer)
+        conn = cls(reader, writer, tls=bool(ssl))
         try:
             await asyncio.wait_for(
                 conn._startup(user=user, database=database, password=password, application_name=application_name),
@@ -125,6 +128,13 @@ class WalsenderConnection:
                 if code == 0:  # AuthenticationOk
                     break
                 if code == 3:  # CleartextPassword
+                    if not self.tls:
+                        raise PgServerError(
+                            {
+                                "M": "refusing cleartext password on an unencrypted connection; "
+                                "enable ssl= or use SCRAM-SHA-256"
+                            }
+                        )
                     if password is None:
                         raise PgServerError({"M": "server requested a password but none was given"})
                     self._write_message(b"p", password.encode() + b"\x00")

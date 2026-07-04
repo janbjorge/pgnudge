@@ -106,7 +106,27 @@ def test_default_ssl_context_is_verify_full_shaped() -> None:
 # -- authentication ---------------------------------------------------------------
 
 
-async def test_cleartext_password_auth_sends_password() -> None:
+async def tls_flagged_connection(host: str, port: int) -> WalsenderConnection:
+    # White-box: the refusal keys off the tls flag, not the encryption
+    # itself, so flip the flag on a plain socket instead of teaching the
+    # scripted server TLS.
+    reader, writer = await asyncio.open_connection(host, port)
+    return WalsenderConnection(reader, writer, tls=True)
+
+
+async def test_cleartext_password_without_tls_is_refused() -> None:
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await read_startup(reader)
+        writer.write(auth_request(3))  # CleartextPassword
+        await writer.drain()
+        await reader.read()
+
+    async with scripted_server(handler) as (host, port):
+        with pytest.raises(PgServerError, match="refusing cleartext"):
+            await connect(host, port, password="hunter2")
+
+
+async def test_cleartext_password_auth_sends_password_over_tls() -> None:
     got: list[bytes] = []
 
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -120,7 +140,8 @@ async def test_cleartext_password_auth_sends_password() -> None:
         await reader.read()
 
     async with scripted_server(handler) as (host, port):
-        conn = await connect(host, port, password="hunter2")
+        conn = await tls_flagged_connection(host, port)
+        await conn._startup(user="alice", database="db", password="hunter2", application_name="pgnudge")
         conn.abort()
     assert got == [b"p" + b"hunter2\x00"]
 
@@ -133,8 +154,10 @@ async def test_cleartext_request_without_password_raises() -> None:
         await reader.read()
 
     async with scripted_server(handler) as (host, port):
+        conn = await tls_flagged_connection(host, port)
         with pytest.raises(PgServerError, match="none was given"):
-            await connect(host, port)
+            await conn._startup(user="alice", database="db", password=None, application_name="pgnudge")
+        conn.abort()
 
 
 async def test_unsupported_auth_code_raises() -> None:

@@ -79,15 +79,16 @@ violating one, stop and ask the owner.
 
 ```
 src/pgnudge/
-  proto.py    WalsenderConnection: the protocol client (~240 lines, stdlib
+  proto.py    WalsenderConnection: the protocol client (~250 lines, stdlib
               asyncio + scramp only). Startup with replication=database,
               optional TLS via StreamWriter.start_tls, auth = trust /
-              cleartext / SCRAM-SHA-256 (-PLUS mechanisms filtered out; no
-              channel binding), simple_query (walsender mode speaks ONLY the
+              cleartext (refused unless the connection is TLS) /
+              SCRAM-SHA-256 (-PLUS mechanisms filtered out; no channel
+              binding), simple_query (walsender mode speaks ONLY the
               simple query subprotocol), start_replication -> CopyBoth,
               read_stream() -> XLogData | Keepalive (frozen slots
-              dataclasses), send_standby_status(), abort() = deliberate
-              hard close.
+              dataclasses), send_standby_status(lsn, reply=...), abort() =
+              deliberate hard close.
   core.py     The contract only: Event/Batch/Resync dataclasses + FeedItem.
               Event is payload/first_seen/count — `channel` and
               `payload_filter` were dropped 2026-07-04 (breaking, owner
