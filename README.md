@@ -144,6 +144,11 @@ temp slot dies with the bridge.
 - Managed platforms: enabling `wal_level=logical` typically requires a
   restart (once); grant `REPLICATION` to a dedicated role rather than
   widening an app role — logical decoding sees the whole database's stream.
+- Thundering herd: a database restart reconnects every feed at once, and
+  every consumer's `Resync` handler refetches at once. Reconnect timing is
+  already jittered, but the refetch is your code — add jitter there when
+  many consumers share a database, or fan out through the bridge daemon so
+  a single process refetches per change.
 - TLS: `ssl=True` uses platform CA verification; pass an `ssl.SSLContext`
   for custom trust. SCRAM-SHA-256 is supported everywhere; cleartext auth
   only over TLS — pgnudge refuses to send a password on an unencrypted
@@ -179,8 +184,12 @@ uv sync && uv run pytest
 
 ## Roadmap
 
-- Native `pgoutput` parsing (drops the wal2json server-plugin requirement;
-  publications permitting).
+- Native `pgoutput` parsing would drop the wal2json server-plugin
+  requirement — but pgoutput only decodes through a *publication*, and a
+  publication is a persistent catalog object, in direct tension with the
+  nothing-outlives-the-connection guarantee. Conditional at best: viable
+  only if a pre-existing, application-owned publication counts as
+  configuration rather than footprint.
 - Opt-in `schema.table:pk` payloads for sharper client-side routing.
 - The bridge daemon as a first-class artifact — same feed contract, one
   slot fanned out over NOTIFY; a native (Zig) implementation is the
