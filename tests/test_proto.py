@@ -97,6 +97,20 @@ async def test_connect_times_out_on_silent_server() -> None:
             await connect(host, port, timeout=0.2)
 
 
+async def test_connect_times_out_when_server_never_answers_ssl_request() -> None:
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await reader.readexactly(8)  # SSLRequest
+        await reader.read()  # never answer
+
+    async with scripted_server(handler) as (host, port):
+        with pytest.raises(TimeoutError):
+            await connect(host, port, use_ssl=True, timeout=0.2)
+
+
+def test_parse_error_tolerates_truncated_field() -> None:
+    assert proto._parse_error(b"Mboom") == {"M": "boom"}  # final NUL terminator missing
+
+
 def test_default_ssl_context_is_verify_full_shaped() -> None:
     ctx = proto._default_ssl_context()
     assert ctx.verify_mode is ssl.CERT_REQUIRED
@@ -181,6 +195,30 @@ async def test_sasl_with_only_plus_mechanisms_raises() -> None:
 
     async with scripted_server(handler) as (host, port):
         with pytest.raises(PgServerError, match="unsupported SASL"):
+            await connect(host, port, password="pw")
+
+
+async def test_sasl_continue_before_sasl_raises() -> None:
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await read_startup(reader)
+        writer.write(auth_request(11, b"r=nope"))  # SASLContinue with no SASL exchange open
+        await writer.drain()
+        await reader.read()
+
+    async with scripted_server(handler) as (host, port):
+        with pytest.raises(PgServerError, match="SASLContinue before SASL"):
+            await connect(host, port, password="pw")
+
+
+async def test_sasl_final_before_sasl_raises() -> None:
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await read_startup(reader)
+        writer.write(auth_request(12, b"v=nope"))  # SASLFinal with no SASL exchange open
+        await writer.drain()
+        await reader.read()
+
+    async with scripted_server(handler) as (host, port):
+        with pytest.raises(PgServerError, match="SASLFinal before SASL"):
             await connect(host, port, password="pw")
 
 
@@ -383,6 +421,24 @@ async def test_send_standby_status_can_request_a_reply() -> None:
         conn.abort()
 
     assert got[0][34:35] == b"\x01"
+
+
+async def test_send_standby_status_serializes_concurrent_senders() -> None:
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await read_startup(reader)
+        writer.write(trust_handshake())
+        await writer.drain()
+        await reader.read()
+
+    async with scripted_server(handler) as (host, port):
+        conn = await connect(host, port)
+        await conn.send_lock.acquire()
+        send = asyncio.create_task(conn.send_standby_status(1))
+        await asyncio.sleep(0.05)
+        assert not send.done()  # a concurrent sender holds the lock; nothing on the wire yet
+        conn.send_lock.release()
+        await asyncio.wait_for(send, 2.0)
+        conn.abort()
 
 
 async def test_abort_is_idempotent() -> None:

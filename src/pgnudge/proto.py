@@ -43,7 +43,10 @@ def _parse_error(body: bytes) -> dict[str, str]:
     i = 0
     while i < len(body) and body[i : i + 1] != b"\x00":
         code = chr(body[i])
-        j = body.index(b"\x00", i + 1)
+        j = body.find(b"\x00", i + 1)
+        if j < 0:
+            fields[code] = body[i + 1 :].decode("utf-8", "replace")
+            break
         fields[code] = body[i + 1 : j].decode("utf-8", "replace")
         i = j + 1
     return fields
@@ -71,6 +74,7 @@ class WalsenderConnection:
         self._writer = writer
         self.tls = tls
         self.backend_pid: int | None = None
+        self.send_lock = asyncio.Lock()
 
     # -- connection & auth ----------------------------------------------------
 
@@ -89,14 +93,17 @@ class WalsenderConnection:
     ) -> Self:
         reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), connect_timeout)
         if ssl:
-            writer.write(struct.pack("!ii", 8, cls._SSL_REQUEST))
-            await writer.drain()
-            answer = await reader.readexactly(1)
-            if answer != b"S":
+            try:
+                async with asyncio.timeout(connect_timeout):
+                    writer.write(struct.pack("!ii", 8, cls._SSL_REQUEST))
+                    await writer.drain()
+                    if await reader.readexactly(1) != b"S":
+                        raise ConnectionError("server refused SSL")
+                    ctx = ssl if isinstance(ssl, ssl_module.SSLContext) else _default_ssl_context()
+                    await writer.start_tls(ctx, server_hostname=host)
+            except BaseException:
                 writer.close()
-                raise ConnectionError("server refused SSL")
-            ctx = ssl if isinstance(ssl, ssl_module.SSLContext) else _default_ssl_context()
-            await writer.start_tls(ctx, server_hostname=host)
+                raise
         conn = cls(reader, writer, tls=bool(ssl))
         try:
             await asyncio.wait_for(
@@ -149,12 +156,14 @@ class WalsenderConnection:
                     self._write_message(b"p", scram.mechanism_name.encode() + b"\x00" + struct.pack("!i", len(first)) + first)
                     await self._writer.drain()
                 elif code == 11:  # SASLContinue
-                    assert scram is not None
+                    if scram is None:
+                        raise PgServerError({"M": "server sent SASLContinue before SASL"})
                     scram.set_server_first(mbody[4:].decode())
                     self._write_message(b"p", scram.get_client_final().encode())
                     await self._writer.drain()
                 elif code == 12:  # SASLFinal
-                    assert scram is not None
+                    if scram is None:
+                        raise PgServerError({"M": "server sent SASLFinal before SASL"})
                     scram.set_server_final(mbody[4:].decode())
                 else:
                     raise PgServerError({"M": f"unsupported authentication request (code {code}); pgnudge speaks trust, cleartext and SCRAM-SHA-256"})
@@ -235,8 +244,11 @@ class WalsenderConnection:
     async def send_standby_status(self, lsn: int, *, reply: bool = False) -> None:
         """Acknowledge everything up to ``lsn``; ``reply`` asks the server to answer with a keepalive."""
         ts = int((time.time() - self._PG_EPOCH_UNIX) * 1_000_000)
-        self._write_message(b"d", b"r" + struct.pack("!QQQQB", lsn, lsn, lsn, ts, int(reply)))
-        await self._writer.drain()
+        # serialized: concurrent drain() on a paused transport trips the
+        # single-waiter assert in asyncio's FlowControlMixin
+        async with self.send_lock:
+            self._write_message(b"d", b"r" + struct.pack("!QQQQB", lsn, lsn, lsn, ts, int(reply)))
+            await self._writer.drain()
 
     # -- teardown ----------------------------------------------------------------
 
