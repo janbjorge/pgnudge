@@ -3,7 +3,6 @@ lifecycle against a scripted in-process walsender — no PostgreSQL.
 """
 
 import asyncio
-import logging
 import struct
 import time
 
@@ -159,15 +158,16 @@ async def test_feedback_loop_sends_status_until_send_fails() -> None:
     assert not conn.aborted
 
 
-async def test_feedback_loop_aborts_when_server_goes_silent(caplog: pytest.LogCaptureFixture) -> None:
-    caplog.set_level(logging.WARNING, logger="pgnudge.wal")
+async def test_feedback_loop_aborts_when_server_goes_silent(
+    log_records: list[tuple[str, str]],
+) -> None:
     conn = RecordingConn()
     feed = wal_feed(5432, status_interval=0.01, liveness_timeout=0.02)
     feed.last_inbound = time.monotonic() - 99
     await asyncio.wait_for(feed._feedback_loop(conn), 2.0)
     assert conn.aborted
     assert conn.sent == []
-    assert any("no server traffic" in r.message for r in caplog.records)
+    assert any("no server traffic" in message for _, message in log_records)
 
 
 async def test_feedback_loop_liveness_disabled_never_probes_or_aborts() -> None:
@@ -183,16 +183,15 @@ async def test_feedback_loop_liveness_disabled_never_probes_or_aborts() -> None:
 
 
 async def test_supervisor_keeps_retrying_when_server_unreachable(
-    caplog: pytest.LogCaptureFixture,
+    log_records: list[tuple[str, str]],
 ) -> None:
-    caplog.set_level(logging.DEBUG, logger="pgnudge.wal")
     feed = wal_feed(refused_port())
     async with feed:
         await asyncio.sleep(0.1)  # several connect -> backoff rounds
         assert feed.connection_pid is None
         assert feed.slot_name is None
-    assert any("failed" in r.message and r.levelno == logging.WARNING for r in caplog.records)
-    assert any("reconnect attempt" in r.message and r.levelno == logging.DEBUG for r in caplog.records)
+    assert any("failed" in message for level, message in log_records if level == "WARNING")
+    assert any("reconnect attempt" in message for level, message in log_records if level == "DEBUG")
 
 
 async def test_supervisor_retries_when_slot_creation_fails() -> None:
@@ -279,8 +278,9 @@ class FakeWalsender:
         await reader.read()  # hold the session until the client aborts
 
 
-async def test_walfeed_lifecycle_against_scripted_walsender(caplog: pytest.LogCaptureFixture) -> None:
-    caplog.set_level(logging.INFO, logger="pgnudge.wal")
+async def test_walfeed_lifecycle_against_scripted_walsender(
+    log_records: list[tuple[str, str]],
+) -> None:
     server = FakeWalsender()
     async with scripted_server(server.handle) as (_, port):
         async with wal_feed(port) as feed:
@@ -304,8 +304,8 @@ async def test_walfeed_lifecycle_against_scripted_walsender(caplog: pytest.LogCa
 
     assert server.connections == 2
     assert server.statuses == [20]  # keepalive reply acked max(xlog 10, keepalive 20)
-    assert sum("streaming from slot" in r.message for r in caplog.records) == 2
-    assert any("stream error" in r.message and r.levelno == logging.WARNING for r in caplog.records)
+    assert sum("streaming from slot" in message for _, message in log_records) == 2
+    assert any("stream error" in message for level, message in log_records if level == "WARNING")
     create, start = server.commands[0], server.commands[1]
     assert "CREATE_REPLICATION_SLOT" in create and "TEMPORARY" in create
     assert "SNAPSHOT 'nothing'" in create  # from-connect-only, law 5

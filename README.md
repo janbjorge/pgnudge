@@ -16,10 +16,10 @@ renders a query and wants to re-render the instant the database moves.
 pip install pgnudge
 ```
 
-Python ≥ 3.11, PostgreSQL ≥ 16. One dependency:
-[scramp](https://github.com/tlocke/scramp) (pure-Python SCRAM auth). No
-database driver — pgnudge speaks the PostgreSQL replication protocol
-itself.
+Python ≥ 3.11, PostgreSQL ≥ 16. Two dependencies:
+[scramp](https://github.com/tlocke/scramp) (pure-Python SCRAM auth) and
+[loguru](https://github.com/delgan/loguru) (logging). No database driver —
+pgnudge speaks the PostgreSQL replication protocol itself.
 
 ## Sixty-second tour
 
@@ -153,10 +153,11 @@ temp slot dies with the bridge.
   for custom trust. SCRAM-SHA-256 is supported everywhere; cleartext auth
   only over TLS — pgnudge refuses to send a password on an unencrypted
   connection.
-- Logging: the `pgnudge.wal` logger (stdlib `logging`, no handlers
-  configured by the library) reports connect failures and stream errors at
-  WARNING, successful (re)connects at INFO, and backoff timing at DEBUG —
-  a feed that reconnects in a loop is visible, not silent.
+- Logging: pgnudge logs through [loguru](https://github.com/delgan/loguru) —
+  connect failures and stream errors at WARNING, successful (re)connects at
+  INFO, backoff timing at DEBUG — so a feed that reconnects in a loop is
+  visible, not silent. Silence it with `logger.disable("pgnudge")`, or
+  route/filter it like any other loguru source.
 
 ## Tested how
 
