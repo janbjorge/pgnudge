@@ -8,7 +8,7 @@ version = "1.0.0"
 description = "Push-only change nudges from PostgreSQL logical replication: the database nudges, consumers refetch."
 readme = "README.md"
 license = { text = "MIT" }
-requires-python = ">=3.13"
+requires-python = ">=3.11"
 dependencies = ["scramp>=1.4"]
 keywords = ["postgresql", "logical-replication", "change-feed", "asyncio", "cache-invalidation"]
 classifiers = [
@@ -16,6 +16,8 @@ classifiers = [
   "Framework :: AsyncIO",
   "Intended Audience :: Developers",
   "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
   "Programming Language :: Python :: 3.14",
   "Topic :: Database",
@@ -56,6 +58,7 @@ exclude_also = ["if TYPE_CHECKING:"]
 
 [tool.mypy]
 strict = true
+python_version = "3.11"
 files = ["src", "tests"]
 mypy_path = "src"
 disallow_any_explicit = true

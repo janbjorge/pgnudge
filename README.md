@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/janbjorge/pgnudge/actions/workflows/ci.yml/badge.svg)](https://github.com/janbjorge/pgnudge/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/pgnudge)](https://pypi.org/project/pgnudge/)
-[![Python](https://img.shields.io/badge/python-3.13%2B-blue)](https://pypi.org/project/pgnudge/)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://pypi.org/project/pgnudge/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 Your database moves; your app wakes up. pgnudge tells you *that* something
@@ -16,7 +16,7 @@ renders a query and wants to re-render the instant the database moves.
 pip install pgnudge
 ```
 
-Python ≥ 3.13, PostgreSQL ≥ 16. One dependency:
+Python ≥ 3.11, PostgreSQL ≥ 16. One dependency:
 [scramp](https://github.com/tlocke/scramp) (pure-Python SCRAM auth). No
 database driver — pgnudge speaks the PostgreSQL replication protocol
 itself.

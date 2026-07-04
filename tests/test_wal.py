@@ -2,12 +2,16 @@
 
 import asyncio
 import ssl
+from typing import TypeVar
 
 import asyncpg
 import pytest
 from conftest import PgParams
 
 from pgnudge import Batch, Resync, WalFeed
+
+# module-level by necessity: a generic function needs a TypeVar on 3.11
+T = TypeVar("T", bound=Resync | Batch)
 
 
 def wal_feed(
@@ -29,7 +33,7 @@ def wal_feed(
     )
 
 
-async def expect[T: Resync | Batch](feed: WalFeed, kind: type[T], timeout: float = 8.0) -> T:
+async def expect(feed: WalFeed, kind: type[T], timeout: float = 8.0) -> T:
     item = await asyncio.wait_for(anext(feed), timeout)
     assert isinstance(item, kind), f"expected {kind.__name__}, got {item!r}"
     return item

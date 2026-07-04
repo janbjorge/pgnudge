@@ -4,7 +4,7 @@ pgnudge is a Python framework for **push-only change nudges from PostgreSQL
 with zero server footprint**. Consumers get an async iterator of two item
 types — `Resync` (reload everything) and `Batch` (coalesced wakeups saying
 *which tables moved*) — and refetch their own data. The framework never
-carries application data. Python >= 3.13, async-first, MIT-licensed,
+carries application data. Python >= 3.11, async-first, MIT-licensed,
 runtime dependency: scramp only.
 
 Named `pgnudge` (v1.0.0): *pgqueuer moves work, pgnudge moves wakefulness.*
@@ -145,7 +145,7 @@ docs/
 examples/
   minimal.py   smallest end-to-end consumer: WalFeed + match on Resync/Batch.
 .github/workflows/
-  ci.yml       lint (ruff + mypy), test matrix Python 3.13/3.14 × PG 16-18
+  ci.yml       lint (ruff + mypy), test matrix Python 3.11-3.14 × PG 16-18
                (test_decoding), one wal2json job on a CI-built image.
 ```
 
@@ -217,19 +217,21 @@ with nothing but psql —
 2. Third-party packages (scramp; asyncpg/pytest/testcontainers in tests)
 3. Internal imports using absolute paths (`from pgnudge.core import Batch`)
 
-- **No `from __future__ import annotations`.** pgnudge targets Python >= 3.13;
-  modern syntax is used directly (PEP 695 `type` aliases and generics,
-  `Self`, `collections.abc` imports). This deliberately deviates from
-  pgqueuer, which supports 3.10.
+- **No `from __future__ import annotations`.** pgnudge targets Python >= 3.11
+  (lowered from 3.13 on 2026-07-04 after external review — 3.13 was too
+  narrow for production fleets); everything used is runtime-valid on 3.11
+  (`Self`, PEP 604 unions, `collections.abc` imports). **No PEP 695** `type`
+  aliases or generic syntax — those need 3.12+; use `typing.TypeAlias` and
+  `typing.TypeVar` instead.
 - **No local imports.** All imports at module top level; the only exception
   is `if TYPE_CHECKING:` blocks for breaking circular imports at runtime.
 
 ### Type Annotations
 
 - **Always annotate** all function/method signatures, tests included.
-- Use native types: `list[str]`, `int | None` (never `Optional`), PEP 695
-  `type` aliases (`type FeedItem = Resync | Batch`), `ClassVar` for class
-  constants, `Self` for fluent/classmethod returns.
+- Use native types: `list[str]`, `int | None` (never `Optional`),
+  `TypeAlias` aliases (`FeedItem: TypeAlias = Resync | Batch`), `ClassVar`
+  for class constants, `Self` for fluent/classmethod returns.
 - **No `Any`, anywhere.** `disallow_any_explicit` is on and there are no
   exceptions — not even at protocol boundaries. Use proper types, generics,
   protocols, or `object` instead. (Stricter than pgqueuer's
@@ -382,7 +384,7 @@ This project follows
 
 ## CI Matrix
 
-Python 3.13/3.14 × PostgreSQL 16–18 on Ubuntu (test_decoding), plus one
+Python 3.11–3.14 × PostgreSQL 16–18 on Ubuntu (test_decoding), plus one
 wal2json job on a CI-built `postgres:16` + PGDG `postgresql-16-wal2json`
 image (the debezium/postgres:16 image does NOT ship wal2json — first CI
 run failed on it 2026-07-04, fixed same day). Lint job runs ruff + mypy.

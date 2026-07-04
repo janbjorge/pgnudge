@@ -5,6 +5,7 @@ at-least-once, every gap bracketed by a Resync. See README.
 """
 
 from dataclasses import dataclass
+from typing import TypeAlias
 
 __all__ = ["Event", "Batch", "Resync", "FeedItem"]
 
@@ -35,4 +36,4 @@ class Resync:
     reason: str
 
 
-type FeedItem = Resync | Batch
+FeedItem: TypeAlias = Resync | Batch

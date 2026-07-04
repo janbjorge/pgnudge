@@ -49,9 +49,13 @@ class Intake:
         return await self.queue.get()
 
     async def get_within(self, timeout: float) -> Wakeup | None:
+        # asyncio.timeout, not wait_for: 3.11's wait_for can swallow an
+        # external cancel when the inner get() already has an item, leaving
+        # the pump task uncancellable and aclose() hanging
         try:
-            return await asyncio.wait_for(self.queue.get(), timeout)
-        except (asyncio.TimeoutError, TimeoutError):
+            async with asyncio.timeout(timeout):
+                return await self.queue.get()
+        except TimeoutError:
             return None
 
     def consume_overflow(self) -> bool:
