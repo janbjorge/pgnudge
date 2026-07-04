@@ -72,6 +72,10 @@ role with `REPLICATION`, and an output plugin — `wal2json` (default;
 preinstalled on Azure Flexible Server, RDS, and most managed platforms) or
 `test_decoding` (ships inside PostgreSQL itself).
 
+The full mechanics — logical decoding, temporary-slot semantics, the
+gap-free handshake argument, and **when not to use pgwake** — are in
+[docs/temporary-slots.md](docs/temporary-slots.md).
+
 ## The contract
 
 A feed yields exactly two item types:
