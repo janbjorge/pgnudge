@@ -10,6 +10,10 @@ from conftest import PgParams
 
 from pgnudge import Batch, Resync, WalFeed
 
+# live tests are exempt from the 2s budget: the first one pays for the
+# session-scoped container pull + start
+pytestmark = pytest.mark.timeout(300)
+
 # module-level by necessity: a generic function needs a TypeVar on 3.11
 T = TypeVar("T", bound=Resync | Batch)
 

@@ -333,6 +333,11 @@ in their docstring), banner section headers beyond the existing light
 ## Testing Conventions
 
 - **pytest config**: `asyncio_mode = "auto"`, function-scoped event loops.
+- **2-second budget per test** (pytest-timeout, `timeout = 2` in
+  pyproject): a hung protocol read must fail fast, never wedge the suite.
+  Tests that legitimately need longer opt out with
+  `@pytest.mark.timeout(...)` — `test_wal.py` does so module-wide
+  (`pytestmark`) because the first live test pays for the container start.
 - Declare async tests as `async def test_...` — no `@pytest.mark.asyncio`
   decorator needed.
 - Annotate all test function parameters and returns
