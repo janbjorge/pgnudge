@@ -24,3 +24,6 @@ htmlcov/
 .idea/
 .vscode/
 *.swp
+
+# claude session artifacts — never commit
+.claude/
