@@ -30,9 +30,10 @@ cost:
 
 That persistence is the point for a replica — and exactly wrong for a nudge
 feed. A crashed consumer that never comes back leaves a slot pinning WAL
-forever; the disk fills; someone gets paged. Every CDC deployment carries this
-risk as an operational duty ("if a slot is no longer required it should be
-dropped"[^2] — by *you*).
+forever; the disk fills; someone gets paged. Systems built on persistent
+slots accept this as a deliberate operational duty — the manual's advice
+("if a slot is no longer required it should be dropped"[^2]) is directed at
+the operator.
 
 ## The temporary slot inverts the deal
 
@@ -113,9 +114,9 @@ pgwake trades completeness for zero footprint. When completeness is the
 requirement, take the other side of the trade:
 
 - **Every change must be processed.** pgwake misses events while disconnected
-  *by design*. If missing one is unacceptable, you need the persistent slot
-  and its operational duties — that is CDC (Debezium, or a hand-rolled
-  persistent-slot consumer), not pgwake.
+  *by design*. If missing one is unacceptable, you need a persistent slot —
+  that is CDC (Debezium, or a hand-rolled persistent-slot consumer), not
+  pgwake.
 - **You need the row data.** Payloads carry identity only, no before/after
   images. Building an audit trail, replicating to another store, computing
   diffs — CDC.

@@ -18,8 +18,8 @@ pip install pgwake
 
 Python ≥ 3.13, PostgreSQL ≥ 16. One dependency:
 [scramp](https://github.com/tlocke/scramp) (pure-Python SCRAM auth). No
-database driver, no psycopg anywhere — pgwake speaks the PostgreSQL
-replication protocol itself.
+database driver — pgwake speaks the PostgreSQL replication protocol
+itself.
 
 ## Sixty-second tour
 
