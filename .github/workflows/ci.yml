@@ -32,20 +32,20 @@ jobs:
       - run: uv sync
       # 100% line+branch locally; 98 leaves headroom for the TLS-dependent
       # lines when the container's best-effort TLS setup fails
-      - run: uv run pytest -q --cov=pgwake --cov-report=term-missing --cov-fail-under=98
+      - run: uv run pytest -q --cov=pgnudge --cov-report=term-missing --cov-fail-under=98
 
   # keeps the wal2json path honest (default matrix runs test_decoding)
   test-wal2json:
     runs-on: ubuntu-latest
     env:
-      POSTGRES_IMAGE: pgwake-wal2json:16
-      PGWAKE_PLUGIN: wal2json
+      POSTGRES_IMAGE: pgnudge-wal2json:16
+      PGNUDGE_PLUGIN: wal2json
     steps:
       - uses: actions/checkout@v4
       # no public image ships wal2json for PG 16 (debezium/postgres dropped it),
       # so build one: official postgres + the PGDG package
       - run: |
-          docker build -t pgwake-wal2json:16 - <<'EOF'
+          docker build -t pgnudge-wal2json:16 - <<'EOF'
           FROM postgres:16
           RUN apt-get update -o Dir::Etc::sourcelist="sources.list.d/pgdg.list" -o Dir::Etc::sourceparts="-" \
               && apt-get install -y --no-install-recommends postgresql-16-wal2json \
@@ -53,4 +53,4 @@ jobs:
           EOF
       - uses: astral-sh/setup-uv@v5
       - run: uv sync
-      - run: uv run pytest -q --cov=pgwake --cov-report=term-missing --cov-fail-under=98
+      - run: uv run pytest -q --cov=pgnudge --cov-report=term-missing --cov-fail-under=98
