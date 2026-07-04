@@ -65,7 +65,6 @@ class WalsenderConnection:
         self._reader = reader
         self._writer = writer
         self.backend_pid: int | None = None
-        self.parameters: dict[str, str] = {}
 
     # -- connection & auth ----------------------------------------------------
 
@@ -151,13 +150,9 @@ class WalsenderConnection:
             else:  # NoticeResponse etc.
                 continue
 
-        while True:  # post-auth: ParameterStatus / BackendKeyData / ReadyForQuery
+        while True:  # post-auth: BackendKeyData / ReadyForQuery ('S' ParameterStatus skipped)
             mtype, mbody = await self._read_message()
-            if mtype == b"S":
-                name, _, rest = mbody.partition(b"\x00")
-                value, _, _ = rest.partition(b"\x00")
-                self.parameters[name.decode()] = value.decode()
-            elif mtype == b"K":
+            if mtype == b"K":
                 self.backend_pid = struct.unpack("!i", mbody[:4])[0]
             elif mtype == b"Z":
                 return
@@ -178,33 +173,20 @@ class WalsenderConnection:
 
     # -- simple query (the only subprotocol walsender mode speaks) --------------
 
-    async def simple_query(self, sql: str) -> list[tuple[str | None, ...]]:
+    async def simple_query(self, sql: str) -> None:
+        """Run a command and drain to ReadyForQuery; result rows are ignored."""
         self._write_message(b"Q", sql.encode() + b"\x00")
         await self._writer.drain()
-        rows: list[tuple[str | None, ...]] = []
         error: dict[str, str] | None = None
         while True:
             mtype, mbody = await self._read_message()
-            if mtype == b"D":
-                (ncols,) = struct.unpack("!h", mbody[:2])
-                offset = 2
-                values: list[str | None] = []
-                for _ in range(ncols):
-                    (length,) = struct.unpack("!i", mbody[offset : offset + 4])
-                    offset += 4
-                    if length == -1:
-                        values.append(None)
-                    else:
-                        values.append(mbody[offset : offset + length].decode())
-                        offset += length
-                rows.append(tuple(values))
-            elif mtype == b"E":
+            if mtype == b"E":
                 error = _parse_error(mbody)
             elif mtype == b"Z":
                 if error is not None:
                     raise PgServerError(error)
-                return rows
-            # 'T' RowDescription, 'C' CommandComplete, 'N' Notice: skipped
+                return
+            # 'T' RowDescription, 'D' DataRow, 'C' CommandComplete, 'N' Notice: skipped
 
     # -- CopyBoth streaming ------------------------------------------------------
 
