@@ -146,8 +146,8 @@ async def test_reconnect_gets_fresh_slot_old_one_auto_dropped(
 
 
 async def test_hard_abort_leaves_no_slots(pg: PgParams, admin: asyncpg.Connection) -> None:
-    # THE proof: aclose() hard-aborts the socket — no protocol goodbye, no
-    # DROP command — and the server still cleans up everything.
+    # THE proof: aclose() hard-aborts the socket (no protocol goodbye, no
+    # DROP command) and the server still cleans up everything.
     await create_tables(admin)
     async with wal_feed(pg) as feed:
         await expect(feed, Resync)

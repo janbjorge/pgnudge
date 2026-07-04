@@ -1,6 +1,6 @@
 """WalFeed: logical decoding from a TEMPORARY replication slot.
 
-The slot auto-drops when the session ends, cleanly or not — nothing pgnudge
+The slot auto-drops when the session ends, cleanly or not; nothing pgnudge
 creates outlives the connection. From-connect-only: a fresh slot per
 (re)connect, no history, no backfill. Semantics and the gap-free handshake
 argument: README. Server needs ``wal_level=logical``, a REPLICATION role,
@@ -190,7 +190,7 @@ class WalFeed(BaseFeed):
                         self._last_lsn = max(self._last_lsn, msg.end_lsn)
                         for table in parse(msg.payload):
                             self._push_raw(table)
-                    else:  # Keepalive — read_stream returns nothing else
+                    else:  # Keepalive; read_stream returns nothing else
                         self._last_lsn = max(self._last_lsn, msg.end_lsn)
                         if msg.reply_requested:
                             await conn.send_standby_status(self._last_lsn)

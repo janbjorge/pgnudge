@@ -1,8 +1,8 @@
 """Session-scoped PostgreSQL via testcontainers; one scratch database per test.
 
 Env knobs: EXTERNAL_POSTGRES_DSN (skip the container), POSTGRES_IMAGE
-(default postgres:17), PGNUDGE_PLUGIN (test_decoding default | wal2json —
-needs an image that ships it; no public one does for PG 16, build your own:
+(default postgres:17), PGNUDGE_PLUGIN (test_decoding default | wal2json,
+which needs an image that ships it; no public one does for PG 16, build your own:
 postgres:16 + apt postgresql-16-wal2json, see ci.yml), PGNUDGE_TLS=1
 (external server has TLS).
 """

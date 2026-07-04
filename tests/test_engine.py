@@ -1,4 +1,4 @@
-"""Unit tests for the engine classes — pure asyncio, no PostgreSQL."""
+"""Unit tests for the engine classes: pure asyncio, no PostgreSQL."""
 
 import asyncio
 

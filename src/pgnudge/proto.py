@@ -253,7 +253,7 @@ class WalsenderConnection:
     # -- teardown ----------------------------------------------------------------
 
     def abort(self) -> None:
-        """Hard-close the socket, no protocol goodbye — slot cleanup must survive crashes."""
+        """Hard-close the socket with no protocol goodbye; slot cleanup must survive crashes."""
         with contextlib.suppress(Exception):
             transport = self._writer.transport
             if isinstance(transport, asyncio.WriteTransport):

@@ -1,6 +1,6 @@
 """Feed contract: the two item types every feed emits.
 
-``Resync`` (reload everything) and ``Batch`` (coalesced wakeups) —
+``Resync`` (reload everything) and ``Batch`` (coalesced wakeups):
 at-least-once, every gap bracketed by a Resync. See README.
 """
 

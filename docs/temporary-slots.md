@@ -4,21 +4,21 @@ pgnudge turns PostgreSQL's write-ahead log into wakeups. The mechanism is
 logical decoding over the streaming-replication protocol; the primitive that
 makes it zero-footprint is the **temporary replication slot**. This page lays
 out the machinery in PostgreSQL's own terms, the guarantees that fall out of
-it — and the cases where you should use something else.
+it, and the cases where you should use something else.
 
 ## The WAL is already a change feed
 
 Every committed change is written exactly once regardless of who is
 listening: to the write-ahead log. Logical decoding is the server facility
 that re-reads WAL and hands each transaction, in commit order, to an *output
-plugin* which formats it into messages.[^1] Nothing extra runs at write time —
+plugin* which formats it into messages.[^1] Nothing extra runs at write time:
 no trigger fires, no row is queued, no table grows. The decoding cost lives on
 the replication connection, not inside your transactions.
 
 That is the whole trick: the change feed already exists. pgnudge just asks the
 server to replay it, live, in a throwaway session.
 
-## Replication slots — and why the normal kind is a liability
+## Replication slots, and why the normal kind is a liability
 
 A replication slot is the server's bookmark for one consumer: it pins the WAL
 (and catalog rows) that consumer still needs. The manual is blunt about the
@@ -28,10 +28,10 @@ cost:
 > of their consumer(s). They will prevent removal of required resources even
 > when there is no connection using them.[^2]
 
-That persistence is the point for a replica — and exactly wrong for a nudge
+That persistence is the point for a replica, and exactly wrong for a nudge
 feed. A crashed consumer that never comes back leaves a slot pinning WAL
 forever; the disk fills; someone gets paged. Systems built on persistent
-slots accept this as a deliberate operational duty — the manual's advice
+slots accept this as a deliberate operational duty. The manual's advice
 ("if a slot is no longer required it should be dropped"[^2]) is directed at
 the operator.
 
@@ -44,13 +44,13 @@ The replication protocol offers one variant with the opposite lifetime:
 > error or when the session has finished.[^3]
 
 Slot lifetime **is** session lifetime, enforced by the server. Clean close,
-crash, `kill -9`, yanked cable, `pg_terminate_backend` — same cleanup path,
+crash, `kill -9`, yanked cable, `pg_terminate_backend`: same cleanup path,
 no cleanup code. A disconnected pgnudge consumer holds *nothing*: no WAL
 retention, no catalog object, no disk.
 
 The trade is that no bookmark survives disconnection, so there is no resume
 and no replay. pgnudge treats that as the design, not the bug: every
-(re)connect creates a fresh slot and emits `Resync` — the consumer refetches
+(re)connect creates a fresh slot and emits `Resync`. The consumer refetches
 its data, and the database it refetches from is the source of truth.
 
 ## The wire conversation
@@ -63,10 +63,10 @@ startup    replication=database            (TLS, SCRAM-SHA-256)
 Q          CREATE_REPLICATION_SLOT "pgnudge_<pid>_<hex>"
              TEMPORARY LOGICAL wal2json (SNAPSHOT 'nothing')
 Q          START_REPLICATION SLOT "…" LOGICAL 0/0 (…plugin options…)
-W          CopyBothResponse                — stream is live
-d/w        XLogData    one decoded change  → push "schema.table"
-d/k        keepalive                       → standby-status reply
-(socket dies, either end)                  → server drops the slot
+W          CopyBothResponse                <- stream is live
+d/w        XLogData    one decoded change  -> push "schema.table"
+d/k        keepalive                       -> standby-status reply
+(socket dies, either end)                  -> server drops the slot
 ```
 
 Two details carry weight:
@@ -75,24 +75,24 @@ Two details carry weight:
   forward from its creation point.[^3] Pre-connect history is unreachable by
   mechanism, not by policy.
 - **Slot creation waits** for write transactions in flight at connect time to
-  finish. A long-running write delays connect — it never causes old changes
+  finish. A long-running write delays connect; it never causes old changes
   to be delivered.
 
 ## Why the handshake is gap-free
 
-`Resync` is emitted only *after* `CopyBothResponse` — after the stream is
+`Resync` is emitted only *after* `CopyBothResponse`, once the stream is
 live. Order of events:
 
 ```
 t0  slot created            decoding start point fixed
 t1  stream live             every commit > t0 will arrive
 t2  Resync delivered        consumer refetches
-t3  refetch executes        observes DB state ≥ t0
+t3  refetch executes        observes DB state >= t0
 ```
 
 Any commit before t0 is included in the refetch. Any commit after t0 produces
-a wakeup. Commits between t0 and t3 are covered *twice* — refetched and
-nudged — which at-least-once semantics absorb for free, since refetching is
+a wakeup. Commits between t0 and t3 are covered *twice* (refetched and
+nudged), which at-least-once semantics absorb for free, since refetching is
 idempotent. There is no window in which a change is neither in the refetch
 nor on the stream.
 
@@ -106,12 +106,12 @@ inside one debounce window collapse into a single `Event` with a `count`. A
 500-row transaction on one table is one wakeup and one refetch. Backpressure
 degrades in the same direction: if the consumer falls behind and the intake
 buffer overflows, pgnudge drops the buffered hints and emits
-`Resync("overflow")` — coarser, never wrong.
+`Resync("overflow")`. Coarser, never wrong.
 
 ## Polling vs. pgnudge
 
-The pattern pgnudge replaces — ask on a timer, whether or not anything
-changed:
+The pattern pgnudge replaces: ask on a timer, whether or not anything
+changed.
 
 ```python
 async def watch(pool: asyncpg.Pool) -> None:
@@ -124,11 +124,11 @@ async def watch(pool: asyncpg.Pool) -> None:
         await asyncio.sleep(2.0)
 ```
 
-The same consumer on pgnudge — sleep until the database says something moved:
+The same consumer on pgnudge: sleep until the database says something moved.
 
 ```python
 async with WalFeed(..., tables=["public.orders"]) as feed:
-    async for item in feed:   # Resync | Batch — either way, refetch
+    async for item in feed:   # Resync | Batch: either way, refetch
         await refresh()
 ```
 
@@ -150,7 +150,7 @@ What changes:
 Polling still has real virtues: it is trivial to reason about, works
 through connection poolers, and needs no grants beyond SELECT. If a
 2-second staleness floor and the idle query load are acceptable for your
-case, polling is a fine answer — pgnudge is for when they aren't.
+case, polling is a fine answer. pgnudge is for when they aren't.
 
 ## When you should NOT use pgnudge
 
@@ -158,15 +158,15 @@ pgnudge trades completeness for zero footprint. When completeness is the
 requirement, take the other side of the trade:
 
 - **Every change must be processed.** pgnudge misses events while disconnected
-  *by design*. If missing one is unacceptable, you need a persistent slot —
-  that is CDC (Debezium, or a hand-rolled persistent-slot consumer), not
+  *by design*. If missing one is unacceptable, you need a persistent slot.
+  That is CDC (Debezium, or a hand-rolled persistent-slot consumer), not
   pgnudge.
 - **You need the row data.** Payloads carry identity only, no before/after
   images. Building an audit trail, replicating to another store, computing
-  diffs — CDC.
+  diffs: CDC.
 - **A message must be processed exactly once, with retries and competing
   consumers.** That is a job queue. Use
-  [pgqueuer](https://github.com/janbjorge/pgqueuer) — pgnudge is its
+  [pgqueuer](https://github.com/janbjorge/pgqueuer). pgnudge is its
   broadcast-shaped sibling, and broadcast has no delivery ledger.
 - **Many consumers, directly attached.** Each feed holds one walsender + one
   slot against `max_wal_senders` / `max_replication_slots`, and each decodes
@@ -175,10 +175,10 @@ requirement, take the other side of the trade:
   one feed in a bridge daemon and fan out over `NOTIFY` instead.
 - **You can't get the server config.** Logical decoding needs
   `wal_level = logical` (restart), a role with `REPLICATION`, and a direct
-  connection — replication traffic bypasses connection poolers such as
+  connection, since replication traffic bypasses connection poolers such as
   PgBouncer. If any of those are off the table, so is pgnudge.
 - **Sub-debounce latency or strict ordering.** Wakeups are debounced,
-  coalesced hints in arrival order — not an ordered event log. If consumers
+  coalesced hints in arrival order, not an ordered event log. If consumers
   must observe individual changes in commit order, decode the stream
   yourself or use CDC.
 

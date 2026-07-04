@@ -1,5 +1,5 @@
 """WalFeed unit tests: payload parsing, command assembly, and a full
-lifecycle against a scripted in-process walsender — no PostgreSQL.
+lifecycle against a scripted in-process walsender; no PostgreSQL.
 """
 
 import asyncio
