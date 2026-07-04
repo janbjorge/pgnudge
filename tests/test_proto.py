@@ -340,6 +340,28 @@ async def test_send_standby_status_acknowledges_lsn_three_ways() -> None:
     assert frame[34:35] == b"\x00"  # no reply requested
 
 
+async def test_send_standby_status_can_request_a_reply() -> None:
+    got: list[bytes] = []
+    received = asyncio.Event()
+
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await read_startup(reader)
+        writer.write(trust_handshake())
+        await writer.drain()
+        mtype, body = await read_frame(reader)
+        got.append(mtype + body)
+        received.set()
+        await reader.read()
+
+    async with scripted_server(handler) as (host, port):
+        conn = await connect(host, port)
+        await conn.send_standby_status(42, reply=True)
+        await asyncio.wait_for(received.wait(), 2.0)
+        conn.abort()
+
+    assert got[0][34:35] == b"\x01"
+
+
 async def test_abort_is_idempotent() -> None:
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         await read_startup(reader)

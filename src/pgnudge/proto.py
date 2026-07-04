@@ -222,10 +222,10 @@ class WalsenderConnection:
             if mtype in (b"c", b"C", b"Z"):
                 raise ConnectionResetError("replication stream ended")
 
-    async def send_standby_status(self, lsn: int) -> None:
-        """Acknowledge everything up to ``lsn`` (written=flushed=applied)."""
+    async def send_standby_status(self, lsn: int, *, reply: bool = False) -> None:
+        """Acknowledge everything up to ``lsn``; ``reply`` asks the server to answer with a keepalive."""
         ts = int((time.time() - self._PG_EPOCH_UNIX) * 1_000_000)
-        self._write_message(b"d", b"r" + struct.pack("!QQQQB", lsn, lsn, lsn, ts, 0))
+        self._write_message(b"d", b"r" + struct.pack("!QQQQB", lsn, lsn, lsn, ts, int(reply)))
         await self._writer.drain()
 
     # -- teardown ----------------------------------------------------------------

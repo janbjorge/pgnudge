@@ -124,22 +124,31 @@ async def test_extra_close_aborts_and_clears_connection() -> None:
         assert feed.slot_name is None
 
 
+class RecordingConn(WalsenderConnection):
+    """Stub connection: records statuses/aborts, fails the nth send."""
+
+    def __init__(self, *, fail_after: int | None = None) -> None:
+        self.backend_pid = None
+        self.fail_after = fail_after
+        self.sent: list[tuple[int, bool]] = []
+        self.aborted = False
+
+    async def send_standby_status(self, lsn: int, *, reply: bool = False) -> None:
+        self.sent.append((lsn, reply))
+        if self.fail_after is not None and len(self.sent) >= self.fail_after:
+            raise ConnectionResetError
+
+    def abort(self) -> None:
+        self.aborted = True
+
+
 async def test_feedback_loop_sends_status_until_send_fails() -> None:
-    sent: list[int] = []
-
-    class FlakyConn(WalsenderConnection):
-        def __init__(self) -> None:
-            self.backend_pid = None
-
-        async def send_standby_status(self, lsn: int) -> None:
-            sent.append(lsn)
-            if len(sent) == 2:
-                raise ConnectionResetError
-
+    conn = RecordingConn(fail_after=2)
     feed = wal_feed(5432, status_interval=0.01)
     feed._last_lsn = 77
-    await asyncio.wait_for(feed._feedback_loop(FlakyConn()), 2.0)  # returns on send failure
-    assert sent == [77, 77]
+    await asyncio.wait_for(feed._feedback_loop(conn), 2.0)  # returns on send failure
+    assert conn.sent == [(77, False), (77, False)]
+    assert not conn.aborted
 
 
 # -- supervisor -------------------------------------------------------------------
