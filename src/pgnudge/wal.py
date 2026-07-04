@@ -74,13 +74,19 @@ class WalFeed(BaseFeed):
         )
         if plugin not in ("wal2json", "test_decoding"):
             raise ValueError(f"unsupported plugin {plugin!r}")
+        if status_interval <= 0:
+            raise ValueError("status_interval must be positive")
+        if liveness_timeout is not None and liveness_timeout <= status_interval:
+            raise ValueError("liveness_timeout must exceed status_interval")
+        if tables is not None and not tables:
+            raise ValueError("tables must be None or a non-empty list")
         self._host = host
         self._port = port
         self._user = user
         self._database = database
         self._password = password
         self._ssl = ssl
-        self._tables = list(tables) if tables else None
+        self._tables = list(tables) if tables is not None else None
         self._plugin = plugin
         self._application_name = application_name
         self._status_interval = status_interval
@@ -214,16 +220,18 @@ class WalFeed(BaseFeed):
         # healthy connection has inbound traffic every status_interval and
         # silence beyond liveness_timeout means the link or walsender is
         # dead. abort() breaks the supervisor's blocked read -> reconnect.
-        probe = self.liveness_timeout is not None
+        # Snapshot once: a runtime mutation of the public attribute must not
+        # half-apply (probe without abort, or the reverse).
+        liveness = self.liveness_timeout
         while True:
             await asyncio.sleep(self._status_interval)
             idle = time.monotonic() - self.last_inbound
-            if self.liveness_timeout is not None and idle > self.liveness_timeout:
+            if liveness is not None and idle > liveness:
                 self.log.warning("no server traffic for %.1fs; aborting connection", idle)
                 conn.abort()
                 return
             try:
-                await conn.send_standby_status(self._last_lsn, reply=probe)
+                await conn.send_standby_status(self._last_lsn, reply=liveness is not None)
             except Exception as exc:
                 self.log.debug("standby status send failed: %s", exc)
                 return

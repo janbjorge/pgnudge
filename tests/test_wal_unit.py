@@ -90,6 +90,21 @@ def test_unsupported_plugin_is_rejected() -> None:
         WalFeed(host="h", port=5432, user="u", database="d", plugin="pgoutput")
 
 
+def test_nonpositive_status_interval_is_rejected() -> None:
+    with pytest.raises(ValueError, match="status_interval"):
+        WalFeed(host="h", port=5432, user="u", database="d", status_interval=0.0)
+
+
+def test_liveness_timeout_not_exceeding_status_interval_is_rejected() -> None:
+    with pytest.raises(ValueError, match="liveness_timeout"):
+        WalFeed(host="h", port=5432, user="u", database="d", status_interval=10.0, liveness_timeout=10.0)
+
+
+def test_empty_tables_list_is_rejected() -> None:
+    with pytest.raises(ValueError, match="tables"):
+        WalFeed(host="h", port=5432, user="u", database="d", tables=[])
+
+
 def test_plugin_options_wal2json_quotes_and_filters_tables() -> None:
     feed = WalFeed(host="h", port=5432, user="u", database="d", tables=["public.picks", "s.o'brien"])
     opts = feed._plugin_options()
@@ -177,6 +192,18 @@ async def test_feedback_loop_liveness_disabled_never_probes_or_aborts() -> None:
     await asyncio.wait_for(feed._feedback_loop(conn), 2.0)
     assert conn.sent == [(0, False)] * 3
     assert not conn.aborted
+
+
+async def test_feedback_loop_snapshots_liveness_at_start() -> None:
+    conn = RecordingConn(fail_after=2)
+    feed = wal_feed(5432, status_interval=0.01, liveness_timeout=None)
+    loop = asyncio.create_task(feed._feedback_loop(conn))
+    await asyncio.sleep(0)  # loop is running; its liveness snapshot is taken
+    feed.liveness_timeout = 0.001  # mutation mid-flight must not enable the probe
+    feed.last_inbound = time.monotonic() - 99
+    await asyncio.wait_for(loop, 2.0)
+    assert not conn.aborted
+    assert conn.sent == [(0, False)] * 2
 
 
 # -- supervisor -------------------------------------------------------------------
