@@ -17,7 +17,7 @@ import ssl as ssl_module
 from typing import ClassVar
 
 from pgwake.engine import BaseFeed
-from pgwake.proto import Keepalive, WalsenderConnection, XLogData
+from pgwake.proto import WalsenderConnection, XLogData
 
 __all__ = ["WalFeed"]
 
@@ -166,7 +166,7 @@ class WalFeed(BaseFeed):
                         self._last_lsn = max(self._last_lsn, msg.end_lsn)
                         for table in parse(msg.payload):
                             self._push_raw(table)
-                    elif isinstance(msg, Keepalive):
+                    else:  # Keepalive — read_stream returns nothing else
                         self._last_lsn = max(self._last_lsn, msg.end_lsn)
                         if msg.reply_requested:
                             await conn.send_standby_status(self._last_lsn)

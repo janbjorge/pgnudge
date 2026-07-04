@@ -87,6 +87,26 @@ async def test_debouncer_overflow_yields_resync() -> None:
     assert item == Resync("overflow")
 
 
+async def test_debouncer_zero_max_batch_wait_closes_window_immediately() -> None:
+    intake = Intake(maxsize=4)
+    deb = Debouncer(debounce=1.0, max_batch_wait=0.0)
+    intake.push("t")
+    item = await asyncio.wait_for(deb.next_item(intake), 1.0)  # hard deadline, not debounce
+    assert isinstance(item, Batch)
+    assert item.payloads() == ("t",)
+
+
+async def test_debouncer_overflow_during_open_window_yields_resync() -> None:
+    intake = Intake(maxsize=1)
+    deb = Debouncer(debounce=0.1, max_batch_wait=1.0)
+    intake.push("a")
+    window = asyncio.create_task(deb.next_item(intake))
+    await asyncio.sleep(0.02)  # window is open, queue drained
+    intake.push("b")
+    intake.push("c")  # overflows mid-window
+    assert await asyncio.wait_for(window, 1.0) == Resync("overflow")
+
+
 async def test_debouncer_hard_deadline_caps_rolling_window() -> None:
     intake = Intake(maxsize=1024)
     deb = Debouncer(debounce=0.1, max_batch_wait=0.3)
@@ -166,6 +186,18 @@ async def test_service_failsafe_emits_periodic_resync() -> None:
         await svc.aclose()
 
 
+async def test_service_start_is_idempotent() -> None:
+    svc = service()
+
+    async def transport() -> None:
+        await asyncio.sleep(3600)
+
+    svc.start(transport, name="test")
+    svc.start(transport, name="test")  # no-op, no duplicate tasks
+    assert len(svc.tasks) == 2  # supervisor + pump
+    await svc.aclose()
+
+
 async def test_service_close_yields_none_and_is_idempotent() -> None:
     svc = service()
 
@@ -187,7 +219,7 @@ class FakeFeed(BaseFeed):
 
     def __init__(self) -> None:
         super().__init__(debounce=0.03)
-        self.closed = False
+        self.closes = 0
 
     async def _supervisor(self) -> None:
         self._emit_resync("connected")
@@ -196,7 +228,7 @@ class FakeFeed(BaseFeed):
         await asyncio.sleep(3600)
 
     async def _extra_close(self) -> None:
-        self.closed = True
+        self.closes += 1
 
 
 async def test_basefeed_iterates_resync_then_batch_and_closes() -> None:
@@ -206,9 +238,26 @@ async def test_basefeed_iterates_resync_then_batch_and_closes() -> None:
         item = await asyncio.wait_for(anext(feed), 1.0)
         assert isinstance(item, Batch)
         assert item.events[0].count == 5
-    assert feed.closed is True
+    assert feed.closes == 1
     with pytest.raises(StopAsyncIteration):
         await asyncio.wait_for(anext(feed), 1.0)
+
+
+async def test_basefeed_aclose_is_idempotent() -> None:
+    feed = FakeFeed()
+    async with feed:
+        await asyncio.wait_for(anext(feed), 1.0)
+    await feed.aclose()  # second close: no-op, _extra_close not re-run
+    assert feed.closes == 1
+
+
+async def test_basefeed_aiter_starts_without_context_manager() -> None:
+    feed = FakeFeed()
+    try:
+        assert aiter(feed) is feed  # __aiter__ starts the service lazily
+        assert await asyncio.wait_for(anext(feed), 1.0) == Resync("connected")
+    finally:
+        await feed.aclose()
 
 
 async def test_basefeed_backoff_delegates() -> None:

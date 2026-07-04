@@ -124,6 +124,20 @@ tests/
   test_engine.py  unit tests for the engine classes (Intake, Coalescer,
                Debouncer, Backoff, FeedService, BaseFeed via a FakeFeed) —
                pure asyncio, no PostgreSQL.
+  wire.py      shared wire-protocol helpers for the fake-walsender tests:
+               backend frame builders, frontend frame readers, a
+               scripted_server() harness on an ephemeral localhost port.
+  test_proto.py  WalsenderConnection unit tests against scripted handlers —
+               no PostgreSQL. Auth edge cases (cleartext, missing password,
+               MD5 rejected, SASL -PLUS-only rejected), SSL-refused, silent-
+               server timeout, error/notice handling, read_stream frame
+               parsing, standby-status wire format, abort idempotence.
+  test_wal_unit.py  WalFeed unit tests — no PostgreSQL. wal2json/
+               test_decoding payload parsers, plugin option assembly +
+               SQL quoting, feedback loop, connect/slot-failure retry, and
+               a full lifecycle against a scripted FakeWalsender (connect ->
+               Resync -> Batch -> keepalive ack -> stream end -> reconnect),
+               incl. asserting TEMPORARY + SNAPSHOT 'nothing' on the wire.
   test_wal.py  7 tests incl. the two proofs: no backfill of pre-connect
                writes, and hard abort -> pg_replication_slots EMPTY.
 ```
@@ -149,6 +163,7 @@ nothing to install beyond Docker:
 ```bash
 uv sync                              # .venv + uv.lock, editable + dev group
 uv run pytest                        # spins postgres:17, runs the proofs
+uv run pytest --cov=pgwake --cov-report=term-missing  # 100% line+branch as of 2026-07-04; keep it there
 uv run ruff check . && uv run mypy   # both must stay clean
 uv build
 ```

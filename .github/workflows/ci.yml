@@ -30,7 +30,9 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: uv sync
-      - run: uv run pytest -q
+      # 100% line+branch locally; 98 leaves headroom for the TLS-dependent
+      # lines when the container's best-effort TLS setup fails
+      - run: uv run pytest -q --cov=pgwake --cov-report=term-missing --cov-fail-under=98
 
   # keeps the wal2json path honest (default matrix runs test_decoding)
   test-wal2json:
@@ -51,4 +53,4 @@ jobs:
           EOF
       - uses: astral-sh/setup-uv@v5
       - run: uv sync
-      - run: uv run pytest -q
+      - run: uv run pytest -q --cov=pgwake --cov-report=term-missing --cov-fail-under=98
