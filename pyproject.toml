@@ -12,7 +12,7 @@ requires-python = ">=3.11"
 dependencies = ["scramp>=1.4"]
 keywords = ["postgresql", "logical-replication", "change-feed", "asyncio", "cache-invalidation"]
 classifiers = [
-  "Development Status :: 5 - Production/Stable",
+  "Development Status :: 4 - Beta",
   "Framework :: AsyncIO",
   "Intended Audience :: Developers",
   "License :: OSI Approved :: MIT License",
@@ -30,7 +30,7 @@ Homepage = "https://github.com/janbjorge/pgnudge"
 dev = [
   "ruff>=0.4",
   "mypy>=1.10",
-  "asyncpg>=0.29",  # tests' admin connection only — never a runtime dep
+  "asyncpg>=0.29",  # tests' admin connection only, never a runtime dep
   "pytest>=8",
   "pytest-asyncio>=0.24",
   "pytest-timeout>=2.3",
@@ -50,7 +50,7 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 # every test must finish inside 2s unless it opts out with
-# @pytest.mark.timeout(...) — a hung protocol read fails fast, never wedges the suite
+# @pytest.mark.timeout(...); a hung protocol read fails fast, never wedges the suite
 timeout = 2
 
 [tool.coverage.run]
