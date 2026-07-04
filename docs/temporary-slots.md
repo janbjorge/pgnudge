@@ -108,6 +108,50 @@ degrades in the same direction: if the consumer falls behind and the intake
 buffer overflows, pgwake drops the buffered hints and emits
 `Resync("overflow")` — coarser, never wrong.
 
+## Polling vs. pgwake
+
+The pattern pgwake replaces — ask on a timer, whether or not anything
+changed:
+
+```python
+async def watch(pool: asyncpg.Pool) -> None:
+    last: datetime | None = None
+    while True:
+        stamp = await pool.fetchval("SELECT max(updated_at) FROM orders")
+        if stamp != last:
+            last = stamp
+            await refresh()
+        await asyncio.sleep(2.0)
+```
+
+The same consumer on pgwake — sleep until the database says something moved:
+
+```python
+async with WalFeed(..., tables=["public.orders"]) as feed:
+    async for item in feed:   # Resync | Batch — either way, refetch
+        await refresh()
+```
+
+What changes:
+
+```
+                     poll every 2 s                pgwake
+ ─────────────────────────────────────────────────────────────────────
+ change → wakeup     0–2 s (interval floor)        ~debounce (50 ms)
+ idle cost           1 query / interval / watcher  0 queries; 1 idle
+                                                   walsender session
+ schema needed       updated_at + index, every     none
+                     watched table
+ DELETEs             invisible to max(updated_at)  a change like any other
+ N watchers          N × queries × tables          N sessions (or 1 via
+                                                   the fan-out bridge)
+```
+
+Polling still has real virtues: it is trivial to reason about, works
+through connection poolers, and needs no grants beyond SELECT. If a
+2-second staleness floor and the idle query load are acceptable for your
+case, polling is a fine answer — pgwake is for when they aren't.
+
 ## When you should NOT use pgwake
 
 pgwake trades completeness for zero footprint. When completeness is the
