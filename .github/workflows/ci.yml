@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v8
+      - uses: astral-sh/setup-uv@v8.2.0
       - run: uv sync
       - run: uv run ruff check .
       - run: uv run mypy
@@ -26,7 +26,7 @@ jobs:
       POSTGRES_IMAGE: postgres:${{ matrix.postgres }}
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v8
+      - uses: astral-sh/setup-uv@v8.2.0
         with:
           python-version: ${{ matrix.python }}
       - run: uv sync
@@ -51,6 +51,6 @@ jobs:
               && apt-get install -y --no-install-recommends postgresql-16-wal2json \
               && rm -rf /var/lib/apt/lists/*
           EOF
-      - uses: astral-sh/setup-uv@v8
+      - uses: astral-sh/setup-uv@v8.2.0
       - run: uv sync
       - run: uv run pytest -q --cov=pgnudge --cov-report=term-missing --cov-fail-under=98

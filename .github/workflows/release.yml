@@ -12,7 +12,7 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v8
+      - uses: astral-sh/setup-uv@v8.2.0
       # a tag/version mismatch would burn the PyPI version for good
       - run: test "v$(uv version --short)" = "$GITHUB_REF_NAME"
       - run: uv build
