@@ -105,6 +105,10 @@ write delays connect — it never causes history to be delivered.)
 client-side into one `Event` with a `count` — a 500-row transaction on one
 table is one `Event`, `count=500`, one wakeup, one refetch.
 
+`INSERT`, `UPDATE`, `DELETE`, and `TRUNCATE` all nudge. Logical decoding
+does not carry other DDL, so schema changes don't — pair migrations with a
+refetch if your view depends on them.
+
 ## Why not LISTEN/NOTIFY?
 
 `NOTIFY` doesn't fire itself: making it track data changes means triggers,

@@ -34,7 +34,9 @@ class WalFeed(BaseFeed):
     must stay under the server's ``wal_sender_timeout`` (default 60 s).
     """
 
-    _TEST_DECODING_RE: ClassVar[re.Pattern[str]] = re.compile(r"^table (\S+?): (?:INSERT|UPDATE|DELETE)")
+    _TEST_DECODING_RE: ClassVar[re.Pattern[str]] = re.compile(
+        r"^table (.+?): (?:INSERT|UPDATE|DELETE|TRUNCATE)"
+    )
 
     def __init__(
         self,
@@ -89,14 +91,15 @@ class WalFeed(BaseFeed):
             obj: object = json.loads(payload)
         except ValueError:
             return []
-        if isinstance(obj, dict) and obj.get("action") in ("I", "U", "D"):
+        if isinstance(obj, dict) and obj.get("action") in ("I", "U", "D", "T"):
             return [f"{obj.get('schema', '?')}.{obj.get('table', '?')}"]
         return []
 
     @classmethod
     def _parse_test_decoding(cls, payload: bytes) -> list[str]:
+        # TRUNCATE lists every affected table on one line, ", "-joined
         m = cls._TEST_DECODING_RE.match(payload.decode("utf-8", "replace"))
-        return [m.group(1)] if m else []
+        return m.group(1).split(", ") if m else []
 
     # -- teardown ---------------------------------------------------------------
 

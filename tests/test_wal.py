@@ -107,6 +107,20 @@ async def test_two_table_burst_coalesces(pg: PgParams, admin: asyncpg.Connection
         assert seen == {"public.picks", "public.stations"}
 
 
+async def test_truncate_emits_wakeup(pg: PgParams, admin: asyncpg.Connection) -> None:
+    await create_tables(admin)
+    async with wal_feed(pg) as feed:
+        await expect(feed, Resync)
+        await admin.execute("TRUNCATE picks, stations")
+        seen: set[str] = set()
+        for _ in range(2):
+            batch = await expect(feed, Batch)
+            seen |= set(batch.payloads())
+            if seen == {"public.picks", "public.stations"}:
+                break
+        assert seen == {"public.picks", "public.stations"}
+
+
 async def test_reconnect_gets_fresh_slot_old_one_auto_dropped(
     pg: PgParams, admin: asyncpg.Connection
 ) -> None:

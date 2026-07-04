@@ -42,15 +42,15 @@ def wal_feed(port: int, *, plugin: str = "wal2json", status_interval: float = 10
 # -- payload parsing --------------------------------------------------------------
 
 
-def test_parse_wal2json_v2_emits_schema_table_for_dml() -> None:
-    for action in ("I", "U", "D"):
+def test_parse_wal2json_v2_emits_schema_table_for_dml_and_truncate() -> None:
+    for action in ("I", "U", "D", "T"):
         payload = f'{{"action":"{action}","schema":"public","table":"picks"}}'.encode()
         assert WalFeed._parse_wal2json_v2(payload) == ["public.picks"]
 
 
-def test_parse_wal2json_v2_ignores_non_dml_and_junk() -> None:
+def test_parse_wal2json_v2_ignores_non_table_actions_and_junk() -> None:
     assert WalFeed._parse_wal2json_v2(b'{"action":"B"}') == []  # begin
-    assert WalFeed._parse_wal2json_v2(b'{"action":"T","schema":"s","table":"t"}') == []  # truncate
+    assert WalFeed._parse_wal2json_v2(b'{"action":"M","prefix":"p","content":"c"}') == []  # message
     assert WalFeed._parse_wal2json_v2(b"[1, 2]") == []  # not an object
     assert WalFeed._parse_wal2json_v2(b'"just a string"') == []
     assert WalFeed._parse_wal2json_v2(b"not json at all") == []
@@ -60,10 +60,15 @@ def test_parse_wal2json_v2_tolerates_missing_names() -> None:
     assert WalFeed._parse_wal2json_v2(b'{"action":"I"}') == ["?.?"]
 
 
-def test_parse_test_decoding_matches_dml_only() -> None:
+def test_parse_test_decoding_matches_dml_and_truncate() -> None:
     assert WalFeed._parse_test_decoding(b"table public.picks: INSERT: id[integer]:1") == ["public.picks"]
     assert WalFeed._parse_test_decoding(b"table public.picks: UPDATE: id[integer]:1") == ["public.picks"]
     assert WalFeed._parse_test_decoding(b"table public.picks: DELETE: id[integer]:1") == ["public.picks"]
+    assert WalFeed._parse_test_decoding(b"table public.picks: TRUNCATE: (no-flags)") == ["public.picks"]
+    assert WalFeed._parse_test_decoding(b"table public.a, public.b: TRUNCATE: restart_seqs cascade") == [
+        "public.a",
+        "public.b",
+    ]
     assert WalFeed._parse_test_decoding(b"BEGIN 777") == []
     assert WalFeed._parse_test_decoding(b"COMMIT 777") == []
 
