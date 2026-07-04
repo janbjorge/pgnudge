@@ -10,7 +10,8 @@ import contextlib
 import ssl as ssl_module
 import struct
 import time
-from typing import ClassVar, NamedTuple, Self
+from dataclasses import dataclass
+from typing import ClassVar, Self
 
 from scramp import ScramClient
 
@@ -25,12 +26,14 @@ class PgServerError(Exception):
         super().__init__(f"{fields.get('S', 'ERROR')} {fields.get('C', '?????')}: {fields.get('M', 'unknown')}")
 
 
-class XLogData(NamedTuple):
+@dataclass(frozen=True, slots=True)
+class XLogData:
     end_lsn: int
     payload: bytes
 
 
-class Keepalive(NamedTuple):
+@dataclass(frozen=True, slots=True)
+class Keepalive:
     end_lsn: int
     reply_requested: bool
 
