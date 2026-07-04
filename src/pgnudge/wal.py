@@ -10,6 +10,7 @@ and an output plugin (wal2json or test_decoding).
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -33,6 +34,8 @@ class WalFeed(BaseFeed):
     only); ``ssl`` takes True or an ``ssl.SSLContext``; ``status_interval``
     must stay under the server's ``wal_sender_timeout`` (default 60 s).
     """
+
+    log: ClassVar[logging.Logger] = logging.getLogger("pgnudge.wal")
 
     _TEST_DECODING_RE: ClassVar[re.Pattern[str]] = re.compile(
         r"^table (.+?): (?:INSERT|UPDATE|DELETE|TRUNCATE)"
@@ -139,9 +142,12 @@ class WalFeed(BaseFeed):
                     application_name=self._application_name,
                     connect_timeout=self._connect_timeout,
                 )
-            except Exception:
+            except Exception as exc:
+                self.log.warning("connect to %s:%d failed: %s", self._host, self._port, exc)
                 attempt += 1
-                await asyncio.sleep(self._backoff_delay(attempt))
+                delay = self._backoff_delay(attempt)
+                self.log.debug("reconnect attempt %d in %.2fs", attempt, delay)
+                await asyncio.sleep(delay)
                 continue
 
             self._conn = conn
@@ -159,6 +165,7 @@ class WalFeed(BaseFeed):
                 self.slot_name = slot
                 attempt = 0
                 self._emit_resync("connected" if first else "reconnected")
+                self.log.info("streaming from slot %s (backend pid %s)", slot, conn.backend_pid)
                 first = False
 
                 self._last_lsn = 0
@@ -175,8 +182,9 @@ class WalFeed(BaseFeed):
                             await conn.send_standby_status(self._last_lsn)
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                pass  # fall through to reconnect with a fresh slot
+            except Exception as exc:
+                # fall through to reconnect with a fresh slot
+                self.log.warning("stream error on slot %s, reconnecting: %s", slot, exc)
             finally:
                 if feedback is not None:
                     feedback.cancel()
@@ -189,12 +197,15 @@ class WalFeed(BaseFeed):
 
             if not self._closing:
                 attempt += 1
-                await asyncio.sleep(self._backoff_delay(attempt))
+                delay = self._backoff_delay(attempt)
+                self.log.debug("reconnect attempt %d in %.2fs", attempt, delay)
+                await asyncio.sleep(delay)
 
     async def _feedback_loop(self, conn: WalsenderConnection) -> None:
         while True:
             await asyncio.sleep(self._status_interval)
             try:
                 await conn.send_standby_status(self._last_lsn)
-            except Exception:
+            except Exception as exc:
+                self.log.debug("standby status send failed: %s", exc)
                 return

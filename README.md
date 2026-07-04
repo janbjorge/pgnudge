@@ -140,6 +140,10 @@ temp slot dies with the bridge.
   widening an app role — logical decoding sees the whole database's stream.
 - TLS: `ssl=True` uses platform CA verification; pass an `ssl.SSLContext`
   for custom trust. SCRAM-SHA-256 and cleartext auth are supported.
+- Logging: the `pgnudge.wal` logger (stdlib `logging`, no handlers
+  configured by the library) reports connect failures and stream errors at
+  WARNING, successful (re)connects at INFO, and backoff timing at DEBUG —
+  a feed that reconnects in a loop is visible, not silent.
 
 ## Tested how
 

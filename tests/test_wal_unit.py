@@ -3,6 +3,7 @@ lifecycle against a scripted in-process walsender — no PostgreSQL.
 """
 
 import asyncio
+import logging
 import struct
 
 import pytest
@@ -144,12 +145,17 @@ async def test_feedback_loop_sends_status_until_send_fails() -> None:
 # -- supervisor -------------------------------------------------------------------
 
 
-async def test_supervisor_keeps_retrying_when_server_unreachable() -> None:
+async def test_supervisor_keeps_retrying_when_server_unreachable(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="pgnudge.wal")
     feed = wal_feed(refused_port())
     async with feed:
         await asyncio.sleep(0.1)  # several connect -> backoff rounds
         assert feed.connection_pid is None
         assert feed.slot_name is None
+    assert any("failed" in r.message and r.levelno == logging.WARNING for r in caplog.records)
+    assert any("reconnect attempt" in r.message and r.levelno == logging.DEBUG for r in caplog.records)
 
 
 async def test_supervisor_retries_when_slot_creation_fails() -> None:
@@ -236,7 +242,8 @@ class FakeWalsender:
         await reader.read()  # hold the session until the client aborts
 
 
-async def test_walfeed_lifecycle_against_scripted_walsender() -> None:
+async def test_walfeed_lifecycle_against_scripted_walsender(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.INFO, logger="pgnudge.wal")
     server = FakeWalsender()
     async with scripted_server(server.handle) as (_, port):
         async with wal_feed(port) as feed:
@@ -260,6 +267,8 @@ async def test_walfeed_lifecycle_against_scripted_walsender() -> None:
 
     assert server.connections == 2
     assert server.statuses == [20]  # keepalive reply acked max(xlog 10, keepalive 20)
+    assert sum("streaming from slot" in r.message for r in caplog.records) == 2
+    assert any("stream error" in r.message and r.levelno == logging.WARNING for r in caplog.records)
     create, start = server.commands[0], server.commands[1]
     assert "CREATE_REPLICATION_SLOT" in create and "TEMPORARY" in create
     assert "SNAPSHOT 'nothing'" in create  # from-connect-only, law 5
