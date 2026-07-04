@@ -156,7 +156,11 @@ Against an external server instead:
 `EXTERNAL_POSTGRES_DSN=postgresql://... uv run pytest` (role needs
 CREATEDB + REPLICATION; add `PGWAKE_TLS=1` if it has TLS). Default plugin
 is `test_decoding` (zero-install); `PGWAKE_PLUGIN=wal2json` needs an image
-that ships it (`POSTGRES_IMAGE=debezium/postgres:16`).
+that ships it — **no public image does for PG 16** (debezium/postgres
+dropped wal2json; proven missing 2026-07-04, error 58P01). Build one:
+`postgres:16` + apt `postgresql-16-wal2json` from the PGDG repo the
+official image already has configured — see the docker build step in
+`ci.yml`, then `POSTGRES_IMAGE=pgwake-wal2json:16`.
 
 Debugging trick from the PG docs: a replication connection can be tested
 with nothing but psql —
@@ -193,7 +197,9 @@ workflow itself.
    scratch DB per test, EXTERNAL_POSTGRES_DSN escape hatch.
 2. ~~CI~~ — DONE 2026-07-03: `.github/workflows/ci.yml`, Python 3.13/3.14 ×
    PG 16–18 (test_decoding; floor is PG 16+, owner call 2026-07-03) + one
-   wal2json job on debezium/postgres:16.
+   wal2json job on a CI-built image (postgres:16 + PGDG wal2json; the
+   debezium/postgres:16 image does NOT ship wal2json — first CI run failed
+   on it 2026-07-04, fixed same day).
    Repo pushed to github.com/janbjorge/pgwake 2026-07-03 — check Actions
    for the first real runs.
 3. **Bridge daemon** as a first-class example or subpackage: one WalFeed ->

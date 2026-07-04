@@ -2,7 +2,8 @@
 
 Env knobs: EXTERNAL_POSTGRES_DSN (skip the container), POSTGRES_IMAGE
 (default postgres:17), PGWAKE_PLUGIN (test_decoding default | wal2json —
-needs an image that ships it, e.g. debezium/postgres:16), PGWAKE_TLS=1
+needs an image that ships it; no public one does for PG 16, build your own:
+postgres:16 + apt postgresql-16-wal2json, see ci.yml), PGWAKE_TLS=1
 (external server has TLS).
 """
 

@@ -36,10 +36,19 @@ jobs:
   test-wal2json:
     runs-on: ubuntu-latest
     env:
-      POSTGRES_IMAGE: debezium/postgres:16
+      POSTGRES_IMAGE: pgwake-wal2json:16
       PGWAKE_PLUGIN: wal2json
     steps:
       - uses: actions/checkout@v4
+      # no public image ships wal2json for PG 16 (debezium/postgres dropped it),
+      # so build one: official postgres + the PGDG package
+      - run: |
+          docker build -t pgwake-wal2json:16 - <<'EOF'
+          FROM postgres:16
+          RUN apt-get update -o Dir::Etc::sourcelist="sources.list.d/pgdg.list" -o Dir::Etc::sourceparts="-" \
+              && apt-get install -y --no-install-recommends postgresql-16-wal2json \
+              && rm -rf /var/lib/apt/lists/*
+          EOF
       - uses: astral-sh/setup-uv@v5
       - run: uv sync
       - run: uv run pytest -q
