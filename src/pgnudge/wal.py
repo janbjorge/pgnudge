@@ -15,6 +15,7 @@ import os
 import re
 import secrets
 import ssl as ssl_module
+import time
 from typing import ClassVar
 
 from pgnudge.engine import BaseFeed
@@ -33,6 +34,8 @@ class WalFeed(BaseFeed):
     Payloads are ``schema.table``. ``tables`` filters server-side (wal2json
     only); ``ssl`` takes True or an ``ssl.SSLContext``; ``status_interval``
     must stay under the server's ``wal_sender_timeout`` (default 60 s).
+    ``liveness_timeout`` (must exceed ``status_interval``; None disables)
+    bounds how long the feed tolerates a silent server before reconnecting.
     """
 
     log: ClassVar[logging.Logger] = logging.getLogger("pgnudge.wal")
@@ -54,6 +57,7 @@ class WalFeed(BaseFeed):
         plugin: str = "wal2json",
         application_name: str = "pgnudge",
         status_interval: float = 10.0,
+        liveness_timeout: float | None = 30.0,
         connect_timeout: float = 10.0,
         debounce: float = 0.05,
         max_batch_wait: float | None = None,
@@ -80,10 +84,12 @@ class WalFeed(BaseFeed):
         self._plugin = plugin
         self._application_name = application_name
         self._status_interval = status_interval
+        self.liveness_timeout = liveness_timeout
         self._connect_timeout = connect_timeout
 
         self._conn: WalsenderConnection | None = None
         self._last_lsn = 0
+        self.last_inbound = time.monotonic()
         self.slot_name: str | None = None
 
     # -- payload parsing ----------------------------------------------------------
@@ -169,9 +175,11 @@ class WalFeed(BaseFeed):
                 first = False
 
                 self._last_lsn = 0
+                self.last_inbound = time.monotonic()
                 feedback = asyncio.create_task(self._feedback_loop(conn))
                 while True:
                     msg = await conn.read_stream()
+                    self.last_inbound = time.monotonic()
                     if isinstance(msg, XLogData):
                         self._last_lsn = max(self._last_lsn, msg.end_lsn)
                         for table in parse(msg.payload):
@@ -202,10 +210,20 @@ class WalFeed(BaseFeed):
                 await asyncio.sleep(delay)
 
     async def _feedback_loop(self, conn: WalsenderConnection) -> None:
+        # With liveness on, every status requests a keepalive back, so a
+        # healthy connection has inbound traffic every status_interval and
+        # silence beyond liveness_timeout means the link or walsender is
+        # dead. abort() breaks the supervisor's blocked read -> reconnect.
+        probe = self.liveness_timeout is not None
         while True:
             await asyncio.sleep(self._status_interval)
+            idle = time.monotonic() - self.last_inbound
+            if self.liveness_timeout is not None and idle > self.liveness_timeout:
+                self.log.warning("no server traffic for %.1fs; aborting connection", idle)
+                conn.abort()
+                return
             try:
-                await conn.send_standby_status(self._last_lsn)
+                await conn.send_standby_status(self._last_lsn, reply=probe)
             except Exception as exc:
                 self.log.debug("standby status send failed: %s", exc)
                 return

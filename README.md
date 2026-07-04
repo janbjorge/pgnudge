@@ -131,6 +131,12 @@ temp slot dies with the bridge.
 - `status_interval` (default 10 s) must stay under the server's
   `wal_sender_timeout` (default 60 s); the feed also answers
   reply-requested keepalives immediately.
+- `liveness_timeout` (default 30 s, must exceed `status_interval`,
+  `None` disables): each status report asks the server to answer with a
+  keepalive, so a healthy connection always has inbound traffic — silence
+  longer than the timeout means a dead link (NAT drop, yanked VPN, hung
+  walsender) and the feed aborts and reconnects instead of blocking
+  forever.
 - While connected, each `WalFeed` holds one replication slot and one WAL
   sender against `max_replication_slots` / `max_wal_senders`. Disconnected
   feeds hold nothing — that's the point — which also means an idle feed

@@ -108,9 +108,14 @@ src/pgnudge/
               only once the stream is live (this ordering is the gap-free
               handshake argument — see README), parses wal2json
               format-version 2 (default) or test_decoding (zero-install
-              fallback), feedback task every status_interval (default 10s,
+              fallback) — I/U/D/TRUNCATE nudge, logical messages ("M")
+              don't. Feedback task every status_interval (default 10s,
               must stay under wal_sender_timeout, default 60s) plus
-              immediate reply on keepalive reply-requested.
+              immediate reply on keepalive reply-requested; with
+              liveness_timeout set (default 30s) every status requests a
+              keepalive back, and inbound silence past the timeout aborts
+              the socket to force a reconnect (never wait_for on reads).
+              Lifecycle logging on the "pgnudge.wal" logger.
 tests/
   conftest.py  session-scoped PostgreSQL via testcontainers (pgqueuer
                pattern), scratch database per test, best-effort TLS enable

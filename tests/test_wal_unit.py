@@ -5,6 +5,7 @@ lifecycle against a scripted in-process walsender — no PostgreSQL.
 import asyncio
 import logging
 import struct
+import time
 
 import pytest
 from wire import (
@@ -26,7 +27,13 @@ from pgnudge import Batch, Resync, WalFeed
 from pgnudge.proto import WalsenderConnection
 
 
-def wal_feed(port: int, *, plugin: str = "wal2json", status_interval: float = 10.0) -> WalFeed:
+def wal_feed(
+    port: int,
+    *,
+    plugin: str = "wal2json",
+    status_interval: float = 10.0,
+    liveness_timeout: float | None = 30.0,
+) -> WalFeed:
     return WalFeed(
         host="127.0.0.1",
         port=port,
@@ -34,6 +41,7 @@ def wal_feed(port: int, *, plugin: str = "wal2json", status_interval: float = 10
         database="db",
         plugin=plugin,
         status_interval=status_interval,
+        liveness_timeout=liveness_timeout,
         connect_timeout=1.0,
         debounce=0.05,
         backoff=(0.01, 0.05),
@@ -147,7 +155,27 @@ async def test_feedback_loop_sends_status_until_send_fails() -> None:
     feed = wal_feed(5432, status_interval=0.01)
     feed._last_lsn = 77
     await asyncio.wait_for(feed._feedback_loop(conn), 2.0)  # returns on send failure
-    assert conn.sent == [(77, False), (77, False)]
+    assert conn.sent == [(77, True), (77, True)]  # liveness on -> every status probes
+    assert not conn.aborted
+
+
+async def test_feedback_loop_aborts_when_server_goes_silent(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.WARNING, logger="pgnudge.wal")
+    conn = RecordingConn()
+    feed = wal_feed(5432, status_interval=0.01, liveness_timeout=0.02)
+    feed.last_inbound = time.monotonic() - 99
+    await asyncio.wait_for(feed._feedback_loop(conn), 2.0)
+    assert conn.aborted
+    assert conn.sent == []
+    assert any("no server traffic" in r.message for r in caplog.records)
+
+
+async def test_feedback_loop_liveness_disabled_never_probes_or_aborts() -> None:
+    conn = RecordingConn(fail_after=3)
+    feed = wal_feed(5432, status_interval=0.01, liveness_timeout=None)
+    feed.last_inbound = time.monotonic() - 99  # stale forever; must not matter
+    await asyncio.wait_for(feed._feedback_loop(conn), 2.0)
+    assert conn.sent == [(0, False)] * 3
     assert not conn.aborted
 
 
@@ -283,3 +311,55 @@ async def test_walfeed_lifecycle_against_scripted_walsender(caplog: pytest.LogCa
     assert "SNAPSHOT 'nothing'" in create  # from-connect-only, law 5
     assert "START_REPLICATION" in start and "LOGICAL 0/0" in start
     assert "\"format-version\" '2'" in start
+
+
+# -- liveness ---------------------------------------------------------------------
+
+
+async def slot_ritual(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, pid: int) -> None:
+    """Trust auth, CREATE_REPLICATION_SLOT, START_REPLICATION -> CopyBoth."""
+    await read_startup(reader)
+    writer.write(auth_request(0) + backend_key(pid) + ready_for_query())
+    await read_frame(reader)
+    writer.write(command_complete("CREATE_REPLICATION_SLOT") + ready_for_query())
+    await read_frame(reader)
+    writer.write(copy_both_response())
+    await writer.drain()
+
+
+async def test_liveness_probe_reconnects_after_server_goes_silent() -> None:
+    connections = 0
+
+    async def deaf_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        nonlocal connections
+        connections += 1
+        await slot_ritual(reader, writer, 1000 + connections)
+        await reader.read()  # swallow statuses, never answer: half-dead server
+
+    async with scripted_server(deaf_handler) as (_, port):
+        async with wal_feed(port, status_interval=0.02, liveness_timeout=0.06) as feed:
+            assert await asyncio.wait_for(anext(feed), 2.0) == Resync("connected")
+            # nothing but the probe can break the blocked read, so a
+            # reconnect IS the proof the dead link was detected
+            assert await asyncio.wait_for(anext(feed), 2.0) == Resync("reconnected")
+    assert connections >= 2
+
+
+async def test_liveness_probe_keeps_healthy_idle_connection() -> None:
+    connections = 0
+
+    async def answering_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        nonlocal connections
+        connections += 1
+        await slot_ritual(reader, writer, 1000 + connections)
+        while True:  # answer every standby status with a keepalive
+            await read_frame(reader)
+            writer.write(keepalive(10, reply=False))
+            await writer.drain()
+
+    async with scripted_server(answering_handler) as (_, port):
+        async with wal_feed(port, status_interval=0.01, liveness_timeout=0.05) as feed:
+            assert await asyncio.wait_for(anext(feed), 2.0) == Resync("connected")
+            await asyncio.sleep(0.2)  # ~4x the liveness timeout, all idle
+            assert feed.connection_pid == 1001
+    assert connections == 1
