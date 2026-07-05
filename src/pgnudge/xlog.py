@@ -83,10 +83,13 @@ class XLogWalker:
     ``feed`` buffers arbitrary byte chunks and returns events as records
     complete. The first page's ``xlp_rem_len`` skips any record already in
     flight at the start position, so any ``page_floor``-aligned LSN is a
-    valid entry point.
+    valid entry point. ``emit_from`` suppresses events from records ending
+    at or before it: framing must start at a page boundary, but records
+    already written when the caller attached are history, not news.
     """
 
     start_lsn: int
+    emit_from: int = 0
     pos: int = field(init=False)
     buf: bytearray = field(init=False)
     skip: int = field(init=False, default=0)
@@ -191,7 +194,8 @@ class XLogWalker:
             record = bytes(self.rec)
             self.rec = None
             self.rec_need = None
-            self.parse_record(record, out)
+            if self.pos > self.emit_from:
+                self.parse_record(record, out)
         return True
 
     def take_page_header(self) -> bool:

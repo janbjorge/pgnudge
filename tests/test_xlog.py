@@ -274,6 +274,15 @@ def test_byte_at_a_time_feeding_matches_single_feed() -> None:
     assert events == whole and len(whole) == 3
 
 
+def test_emit_from_suppresses_records_already_written_at_attach() -> None:
+    s = WalStream(start_lsn())
+    s.add(heap_insert(xid=1))
+    boundary = s.pos  # everything up to here is history
+    s.add(heap_insert(xid=2))
+    walker = XLogWalker(start_lsn=s.start, emit_from=boundary)
+    assert walker.feed(s.slice_from(s.start)) == [RelChange(xid=2, db_oid=5, relfilenode=16384, kind="insert")]
+
+
 def test_xlog_switch_skips_headerless_zero_fill() -> None:
     s = WalStream(start_lsn())
     s.add(record(rmid=0, info=0x40))  # XLOG_SWITCH

@@ -36,6 +36,18 @@ class PgParams:
         return f"postgresql://{auth}{self.host}:{self.port}/{self.database}"
 
 
+def allow_replication_connections(container: PostgresContainer) -> None:
+    """pg_hba entry for physical replication: it matches the ``replication``
+    pseudo-database, which the docker image's default ``host all`` line does
+    not cover (logical replication does match ``all``; physical does not)."""
+    script = (
+        "echo 'host replication all all scram-sha-256' >> /var/lib/postgresql/data/pg_hba.conf"
+        " && psql -U test -d test -c 'SELECT pg_reload_conf()'"
+    )
+    code, output = container.get_wrapped_container().exec_run(["bash", "-c", script], user="postgres")
+    assert int(code) == 0, output.decode(errors="replace")
+
+
 def _enable_tls(container: PostgresContainer) -> bool:
     """Self-signed cert + ssl=on inside the container. Best effort."""
     script = (
@@ -51,22 +63,27 @@ def _enable_tls(container: PostgresContainer) -> bool:
 
 
 @pytest.fixture(scope="session")
-def postgres() -> Iterator[tuple[str, bool]]:
-    """Yields (dsn, tls_available) for the session's server."""
+def postgres() -> Iterator[tuple[str, bool, PostgresContainer | None]]:
+    """Yields (dsn, tls_available, container) for the session's server.
+
+    The container is None against EXTERNAL_POSTGRES_DSN; tests that need
+    in-container tooling (pg_waldump oracle) skip themselves then.
+    """
     if external := os.environ.get("EXTERNAL_POSTGRES_DSN"):
-        yield external, os.environ.get("PGNUDGE_TLS") == "1"
+        yield external, os.environ.get("PGNUDGE_TLS") == "1", None
         return
 
     image = os.environ.get("POSTGRES_IMAGE", "postgres:17")
     container = PostgresContainer(image, username="test", password="test", dbname="test", driver=None)
     container.with_command("-c wal_level=logical -c fsync=off -c synchronous_commit=off -c full_page_writes=off")
     with container as running:
-        yield running.get_connection_url(), _enable_tls(running)
+        allow_replication_connections(running)
+        yield running.get_connection_url(), _enable_tls(running), running
 
 
 @pytest.fixture
-async def pg(postgres: tuple[str, bool]) -> AsyncGenerator[PgParams]:
-    base_dsn, tls_available = postgres
+async def pg(postgres: tuple[str, bool, PostgresContainer | None]) -> AsyncGenerator[PgParams]:
+    base_dsn, tls_available, _container = postgres
     parsed = urlparse(base_dsn)
     scratch = f"pgnudge_test_{uuid.uuid4().hex[:12]}"
 

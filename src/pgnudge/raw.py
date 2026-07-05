@@ -178,6 +178,13 @@ class RawFeed(BaseFeed):
                     raise ConnectionError("IDENTIFY_SYSTEM returned no position")
                 timeline = int(rows[0][1])
                 flush_lsn = parse_lsn(rows[0][2])
+                # from-connect-only watermark is the *insert* position: with
+                # asynchronous commit, pre-connect writes may not be flushed
+                # yet and would otherwise stream in as news
+                inserted = await catalog.simple_query_rows("SELECT pg_current_wal_insert_lsn()")
+                if not inserted or inserted[0][0] is None:
+                    raise ConnectionError("could not determine the WAL insert position")
+                insert_lsn = parse_lsn(inserted[0][0])
                 # page-align down; the first page's rem_len resynchronizes the walker
                 start = XLogWalker.page_floor(flush_lsn)
                 await stream.start_replication(
@@ -193,7 +200,7 @@ class RawFeed(BaseFeed):
                 )
                 first = False
 
-                walker = XLogWalker(start_lsn=start)
+                walker = XLogWalker(start_lsn=start, emit_from=insert_lsn)
                 gate = CommitGate()
                 self.last_lsn = flush_lsn
                 self.last_inbound = time.monotonic()

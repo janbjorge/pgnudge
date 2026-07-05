@@ -70,12 +70,16 @@ def catalog_rows(query: str) -> bytes:
     return msg(b"T", b"\x00\x03") + rows + command_complete("SELECT") + ready_for_query()
 
 
-async def serve_catalog(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+async def serve_catalog(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter, *, insert_lsn_row: bytes = data_row(b"0/0")
+) -> None:
     while True:
         _, body = await read_frame(reader)
         query = body.rstrip(b"\x00").decode()
         if "pg_database" in query:
             writer.write(msg(b"T", b"\x00\x01") + data_row(b"5") + command_complete("SELECT") + ready_for_query())
+        elif "pg_current_wal_insert_lsn" in query:
+            writer.write(msg(b"T", b"\x00\x01") + insert_lsn_row + command_complete("SELECT") + ready_for_query())
         else:
             writer.write(catalog_rows(query))
         await writer.drain()
@@ -105,7 +109,8 @@ class FakePhysicalWalsender:
                 return  # connection dies during startup
             writer.write(auth_request(0) + backend_key(9999) + ready_for_query())
             await writer.drain()
-            await serve_catalog(reader, writer)
+            broken = self.first == "no-insert-lsn" and self.catalog_sessions == 1
+            await serve_catalog(reader, writer, insert_lsn_row=b"" if broken else data_row(b"0/0"))
             return
         self.stream_sessions += 1
         nth = self.stream_sessions
@@ -386,6 +391,19 @@ async def test_push_committed_without_local_changes_skips_resolution() -> None:
     foreign = RelChange(xid=1, db_oid=6, relfilenode=1, kind="insert")
     await feed.push_committed([], resolver)
     await feed.push_committed([foreign], resolver)  # no resolve call: conn would explode
+
+
+async def test_missing_insert_lsn_forces_reconnect(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.WARNING, logger="pgnudge.raw")
+    wal1, wal2 = picks_then_stations()
+    server = FakePhysicalWalsender(wal1=wal1, wal2=wal2, first="no-insert-lsn")
+    async with scripted_server(server.handle) as (_, port):
+        async with raw_feed(port) as feed:
+            assert await asyncio.wait_for(anext(feed), 2.0) == Resync("connected")
+            batch = await asyncio.wait_for(anext(feed), 2.0)
+            assert isinstance(batch, Batch)
+            assert batch.payloads() == ("public.stations",)
+    assert any("WAL insert position" in r.message for r in caplog.records)
 
 
 async def test_supervisor_exits_cleanly_when_closing_during_stream_error() -> None:
