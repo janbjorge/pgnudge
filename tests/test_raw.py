@@ -244,7 +244,7 @@ def waldump_changes(container: PostgresContainer, start: int, end: int, db_oid: 
     }
     command = (
         f"pg_waldump --start {format_lsn(XLogWalker.page_floor(start))} --end {format_lsn(end)}"
-        " -p /var/lib/postgresql/data/pg_wal"
+        ' -p "$(psql -U test -d test -tAc "SHOW data_directory")/pg_wal"'
     )
     code, output = container.get_wrapped_container().exec_run(["bash", "-c", command], user="postgres")
     assert int(code) == 0, output.decode(errors="replace")

@@ -41,7 +41,8 @@ def allow_replication_connections(container: PostgresContainer) -> None:
     pseudo-database, which the docker image's default ``host all`` line does
     not cover (logical replication does match ``all``; physical does not)."""
     script = (
-        "echo 'host replication all all scram-sha-256' >> /var/lib/postgresql/data/pg_hba.conf"
+        'hba="$(psql -U test -d test -tAc "SHOW hba_file")"'
+        " && echo 'host replication all all scram-sha-256' >> \"$hba\""
         " && psql -U test -d test -c 'SELECT pg_reload_conf()'"
     )
     code, output = container.get_wrapped_container().exec_run(["bash", "-c", script], user="postgres")
@@ -51,7 +52,7 @@ def allow_replication_connections(container: PostgresContainer) -> None:
 def _enable_tls(container: PostgresContainer) -> bool:
     """Self-signed cert + ssl=on inside the container. Best effort."""
     script = (
-        "cd /var/lib/postgresql/data"
+        'cd "$(psql -U test -d test -tAc "SHOW data_directory")"'
         " && openssl req -new -x509 -days 1 -nodes -subj '/CN=localhost'"
         " -out server.crt -keyout server.key 2>/dev/null"
         " && chmod 600 server.key"
@@ -75,7 +76,9 @@ def postgres() -> Iterator[tuple[str, bool, PostgresContainer | None]]:
 
     image = os.environ.get("POSTGRES_IMAGE", "postgres:17")
     container = PostgresContainer(image, username="test", password="test", dbname="test", driver=None)
-    container.with_command("-c wal_level=logical -c fsync=off -c synchronous_commit=off -c full_page_writes=off")
+    container.with_command(
+        "-c wal_level=logical -c fsync=off -c synchronous_commit=off -c full_page_writes=off"
+    )
     with container as running:
         allow_replication_connections(running)
         yield running.get_connection_url(), _enable_tls(running), running
