@@ -16,6 +16,7 @@ __all__ = [
     "backend_key",
     "ready_for_query",
     "command_complete",
+    "data_row",
     "error_response",
     "notice_response",
     "copy_both_response",
@@ -47,6 +48,16 @@ def ready_for_query() -> bytes:
 
 def command_complete(tag: str) -> bytes:
     return msg(b"C", tag.encode() + b"\x00")
+
+
+def data_row(*values: bytes | None) -> bytes:
+    body = struct.pack("!H", len(values))
+    for value in values:
+        if value is None:
+            body += struct.pack("!i", -1)
+        else:
+            body += struct.pack("!i", len(value)) + value
+    return msg(b"D", body)
 
 
 def error_response(message: str = "boom", code: str = "XX000") -> bytes:

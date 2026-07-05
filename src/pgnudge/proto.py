@@ -1,8 +1,9 @@
 """Minimal walsender-mode protocol client, stdlib asyncio + scramp.
 
-Startup with ``replication=database``, optional TLS, trust/cleartext/SCRAM
-auth, simple query, CopyBoth streaming. See PostgreSQL docs: "Streaming
-Replication Protocol", "Message Formats".
+Startup with ``replication=database`` (logical) or ``replication=true``
+(physical), optional TLS, trust/cleartext/SCRAM auth, simple query,
+CopyBoth streaming. See PostgreSQL docs: "Streaming Replication
+Protocol", "Message Formats".
 """
 
 import asyncio
@@ -90,6 +91,7 @@ class WalsenderConnection:
         ssl: bool | ssl_module.SSLContext = False,
         application_name: str = "pgnudge",
         connect_timeout: float = 10.0,
+        replication: str = "database",
     ) -> Self:
         reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), connect_timeout)
         if ssl:
@@ -107,7 +109,13 @@ class WalsenderConnection:
         conn = cls(reader, writer, tls=bool(ssl))
         try:
             await asyncio.wait_for(
-                conn._startup(user=user, database=database, password=password, application_name=application_name),
+                conn._startup(
+                    user=user,
+                    database=database,
+                    password=password,
+                    application_name=application_name,
+                    replication=replication,
+                ),
                 connect_timeout,
             )
         except BaseException:
@@ -115,11 +123,19 @@ class WalsenderConnection:
             raise
         return conn
 
-    async def _startup(self, *, user: str, database: str, password: str | None, application_name: str) -> None:
+    async def _startup(
+        self,
+        *,
+        user: str,
+        database: str,
+        password: str | None,
+        application_name: str,
+        replication: str = "database",
+    ) -> None:
         params = {
             "user": user,
             "database": database,
-            "replication": "database",
+            "replication": replication,
             "application_name": application_name,
             "client_encoding": "UTF8",
         }
@@ -209,6 +225,35 @@ class WalsenderConnection:
                     raise PgServerError(error)
                 return
             # 'T' RowDescription, 'D' DataRow, 'C' CommandComplete, 'N' Notice: skipped
+
+    async def simple_query_rows(self, sql: str) -> list[tuple[str | None, ...]]:
+        """Run a query and return its DataRow values as text; None for SQL NULL."""
+        self._write_message(b"Q", sql.encode() + b"\x00")
+        await self._writer.drain()
+        rows: list[tuple[str | None, ...]] = []
+        error: dict[str, str] | None = None
+        while True:
+            mtype, mbody = await self._read_message()
+            if mtype == b"D":
+                (ncols,) = struct.unpack("!H", mbody[:2])
+                values: list[str | None] = []
+                offset = 2
+                for _ in range(ncols):
+                    (length,) = struct.unpack("!i", mbody[offset : offset + 4])
+                    offset += 4
+                    if length < 0:
+                        values.append(None)
+                    else:
+                        values.append(mbody[offset : offset + length].decode("utf-8", "replace"))
+                        offset += length
+                rows.append(tuple(values))
+            elif mtype == b"E":
+                error = _parse_error(mbody)
+            elif mtype == b"Z":
+                if error is not None:
+                    raise PgServerError(error)
+                return rows
+            # 'T' RowDescription, 'C' CommandComplete, 'N' Notice: skipped
 
     # -- CopyBoth streaming ------------------------------------------------------
 

@@ -15,6 +15,7 @@ from wire import (
     backend_key,
     command_complete,
     copy_both_response,
+    data_row,
     error_response,
     keepalive,
     msg,
@@ -73,6 +74,23 @@ async def test_startup_requests_replication_database_mode() -> None:
     assert seen["database"] == "db"
     assert seen["application_name"] == "pgnudge"
     assert conn.backend_pid == 7
+
+
+async def test_startup_requests_physical_mode_when_asked() -> None:
+    seen: dict[str, str] = {}
+
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        seen.update(await read_startup(reader))
+        writer.write(trust_handshake())
+        await writer.drain()
+        await reader.read()
+
+    async with scripted_server(handler) as (host, port):
+        conn = await WalsenderConnection.connect(
+            host=host, port=port, user="alice", database="db", replication="true", connect_timeout=2.0
+        )
+        conn.abort()
+    assert seen["replication"] == "true"
 
 
 async def test_connect_raises_when_server_refuses_ssl() -> None:
@@ -298,6 +316,46 @@ async def test_simple_query_ignores_result_rows() -> None:
     async with scripted_server(handler) as (host, port):
         conn = await connect(host, port)
         await conn.simple_query("SELECT 1")  # rows skipped, returns cleanly
+        conn.abort()
+
+
+async def test_simple_query_rows_returns_text_values_and_nulls() -> None:
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await read_startup(reader)
+        writer.write(trust_handshake())
+        await writer.drain()
+        await read_frame(reader)
+        writer.write(
+            msg(b"T", b"\x00\x03")  # RowDescription, content skipped
+            + data_row(b"16384", b"public.picks", None)
+            + data_row(b"16400", None, b"x")
+            + command_complete("SELECT 2")
+            + ready_for_query()
+        )
+        await writer.drain()
+        await reader.read()
+
+    async with scripted_server(handler) as (host, port):
+        conn = await connect(host, port)
+        rows = await conn.simple_query_rows("SELECT relfilenode, name, note FROM t")
+        conn.abort()
+    assert rows == [("16384", "public.picks", None), ("16400", None, "x")]
+
+
+async def test_simple_query_rows_raises_after_ready_on_error() -> None:
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await read_startup(reader)
+        writer.write(trust_handshake())
+        await writer.drain()
+        await read_frame(reader)
+        writer.write(error_response("permission denied", code="42501") + ready_for_query())
+        await writer.drain()
+        await reader.read()
+
+    async with scripted_server(handler) as (host, port):
+        conn = await connect(host, port)
+        with pytest.raises(PgServerError, match="42501"):
+            await conn.simple_query_rows("SELECT 1")
         conn.abort()
 
 
