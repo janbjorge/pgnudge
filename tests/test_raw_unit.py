@@ -132,7 +132,14 @@ class FakePhysicalWalsender:
         if nth == 2:
             writer.write(keepalive(wal.start, reply=False))  # no ack expected
         data_lsn = wal.start + BLCKSZ if nth == 1 and self.first == "desync" else wal.start
-        writer.write(xlog_data(data_lsn, bytes(wal.out)))
+        payload = bytes(wal.out)
+        if nth == 1 and self.first == "ok":
+            # two abutting frames: data arrives before its commit, first push releases nothing
+            half = len(payload) // 2
+            writer.write(xlog_data(data_lsn, payload[:half]))
+            writer.write(xlog_data(data_lsn + half, payload[half:]))
+        else:
+            writer.write(xlog_data(data_lsn, payload))
         await writer.drain()
         if nth == 1 and self.first == "ok":
             writer.write(keepalive(wal.pos + 0x1000, reply=True))

@@ -114,7 +114,7 @@ class RawFeed(BaseFeed):
         self.database = database
         self.password = password
         self.ssl = ssl
-        self.tables = list(tables) if tables is not None else None
+        self.tables = frozenset(tables) if tables is not None else None
         self.application_name = application_name
         self.status_interval = status_interval
         self.liveness_timeout = liveness_timeout
@@ -129,6 +129,9 @@ class RawFeed(BaseFeed):
 
     async def _extra_close(self) -> None:
         # Hard-close on purpose: there is nothing server-side to say goodbye to.
+        self.abort_connections()
+
+    def abort_connections(self) -> None:
         for conn in (self.stream_conn, self.catalog_conn):
             if conn is not None:
                 conn.abort()
@@ -159,9 +162,7 @@ class RawFeed(BaseFeed):
             except Exception as exc:
                 self.log.warning("connect to %s:%d failed: %s", self.host, self.port, exc)
                 attempt += 1
-                delay = self._backoff_delay(attempt)
-                self.log.debug("reconnect attempt %d in %.2fs", attempt, delay)
-                await asyncio.sleep(delay)
+                await self.reconnect_pause(attempt)
                 continue
 
             self.stream_conn = stream
@@ -216,7 +217,9 @@ class RawFeed(BaseFeed):
                                 f"stream position {format_lsn(msg.start_lsn)}"
                                 f" does not follow {format_lsn(expected)}"
                             )
-                        await self.push_committed(gate.push(walker.feed(msg.payload)), resolver)
+                        released = gate.push(walker.feed(msg.payload))
+                        if released:
+                            await self.push_committed(released, resolver)
                     elif msg.reply_requested:
                         await stream.send_standby_status(self.last_lsn)
             except asyncio.CancelledError:
@@ -230,17 +233,16 @@ class RawFeed(BaseFeed):
                     with contextlib.suppress(asyncio.CancelledError):
                         await feedback
                 self.connection_pid = None
-                for conn in (self.stream_conn, self.catalog_conn):
-                    if conn is not None:
-                        conn.abort()
-                self.stream_conn = None
-                self.catalog_conn = None
+                self.abort_connections()
 
             if not self._closing:
                 attempt += 1
-                delay = self._backoff_delay(attempt)
-                self.log.debug("reconnect attempt %d in %.2fs", attempt, delay)
-                await asyncio.sleep(delay)
+                await self.reconnect_pause(attempt)
+
+    async def reconnect_pause(self, attempt: int) -> None:
+        delay = self._backoff_delay(attempt)
+        self.log.debug("reconnect attempt %d in %.2fs", attempt, delay)
+        await asyncio.sleep(delay)
 
     async def push_committed(self, committed: list[RelChange], resolver: RelResolver) -> None:
         mine = [change for change in committed if change.db_oid == resolver.db_oid]
