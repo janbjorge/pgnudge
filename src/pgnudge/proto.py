@@ -29,6 +29,7 @@ class PgServerError(Exception):
 
 @dataclass(frozen=True, slots=True)
 class XLogData:
+    start_lsn: int  # WAL position of payload[0]; physical decoding needs it
     end_lsn: int
     payload: bytes
 
@@ -275,8 +276,8 @@ class WalsenderConnection:
             if mtype == b"d":
                 kind = mbody[:1]
                 if kind == b"w":
-                    _start, end, _ts = struct.unpack("!QQQ", mbody[1:25])
-                    return XLogData(end_lsn=end, payload=mbody[25:])
+                    start, end, _ts = struct.unpack("!QQQ", mbody[1:25])
+                    return XLogData(start_lsn=start, end_lsn=end, payload=mbody[25:])
                 if kind == b"k":
                     end, _ts, reply = struct.unpack("!QQB", mbody[1:18])
                     return Keepalive(end_lsn=end, reply_requested=bool(reply))

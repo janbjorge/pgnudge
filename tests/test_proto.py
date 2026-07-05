@@ -412,7 +412,9 @@ async def test_read_stream_parses_xlog_keepalive_and_stream_end() -> None:
 
     async with scripted_server(handler) as (host, port):
         conn = await connect(host, port)
-        assert await conn.read_stream() == XLogData(end_lsn=42, payload=b"table public.picks: INSERT")
+        assert await conn.read_stream() == XLogData(
+            start_lsn=42, end_lsn=42, payload=b"table public.picks: INSERT"
+        )
         assert await conn.read_stream() == Keepalive(end_lsn=99, reply_requested=True)
         with pytest.raises(ConnectionResetError, match="stream ended"):
             await conn.read_stream()
