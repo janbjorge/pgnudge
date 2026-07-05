@@ -108,7 +108,7 @@ class XLogWalker:
     LONG_PHD: ClassVar[int] = 40
     REC_HDR: ClassVar[int] = 24
     MAX_RECORD: ClassVar[int] = 1 << 30
-    PAGE_MAGICS: ClassVar[frozenset[int]] = frozenset({0xD113, 0xD116})  # PG 16, 17
+    PAGE_MAGICS: ClassVar[frozenset[int]] = frozenset({0xD113, 0xD116, 0xD118})  # PG 16, 17, 18
     XLP_FIRST_IS_CONTRECORD: ClassVar[int] = 0x0001
 
     RM_XLOG: ClassVar[int] = 0
