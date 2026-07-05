@@ -8,15 +8,35 @@ Protocol", "Message Formats".
 
 import asyncio
 import contextlib
+import logging
 import ssl as ssl_module
 import struct
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import ClassVar, Self
 
 from scramp import ScramClient
 
-__all__ = ["PgServerError", "XLogData", "Keepalive", "WalsenderConnection"]
+__all__ = [
+    "PgServerError",
+    "XLogData",
+    "Keepalive",
+    "StatusFeedback",
+    "WalsenderConnection",
+    "format_lsn",
+    "parse_lsn",
+]
+
+
+def parse_lsn(text: str) -> int:
+    """``X/Y`` hex notation to an integer WAL position."""
+    high, low = text.split("/")
+    return int(high, 16) << 32 | int(low, 16)
+
+
+def format_lsn(lsn: int) -> str:
+    return f"{lsn >> 32:X}/{lsn & 0xFFFFFFFF:X}"
 
 
 class PgServerError(Exception):
@@ -304,3 +324,37 @@ class WalsenderConnection:
             transport = self._writer.transport
             if isinstance(transport, asyncio.WriteTransport):
                 transport.abort()
+
+
+@dataclass(slots=True, kw_only=True)
+class StatusFeedback:
+    """Periodic standby-status sender with an optional liveness probe.
+
+    With ``liveness`` set, every status requests a keepalive back, so a
+    healthy connection has inbound traffic every ``interval`` and silence
+    beyond ``liveness`` means the link or walsender is dead; the abort
+    breaks the supervisor's blocked read and forces a reconnect.
+    ``liveness`` is snapshotted at construction: a runtime mutation of the
+    feed's public attribute must not half-apply.
+    """
+
+    conn: WalsenderConnection
+    interval: float
+    liveness: float | None
+    lsn: Callable[[], int]
+    idle: Callable[[], float]
+    log: logging.Logger
+
+    async def run(self) -> None:
+        while True:
+            await asyncio.sleep(self.interval)
+            idle = self.idle()
+            if self.liveness is not None and idle > self.liveness:
+                self.log.warning("no server traffic for %.1fs; aborting connection", idle)
+                self.conn.abort()
+                return
+            try:
+                await self.conn.send_standby_status(self.lsn(), reply=self.liveness is not None)
+            except Exception as exc:
+                self.log.debug("standby status send failed: %s", exc)
+                return

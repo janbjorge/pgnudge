@@ -19,7 +19,7 @@ import time
 from typing import ClassVar
 
 from pgnudge.engine import BaseFeed
-from pgnudge.proto import WalsenderConnection, XLogData
+from pgnudge.proto import StatusFeedback, WalsenderConnection, XLogData
 
 __all__ = ["WalFeed"]
 
@@ -216,22 +216,11 @@ class WalFeed(BaseFeed):
                 await asyncio.sleep(delay)
 
     async def _feedback_loop(self, conn: WalsenderConnection) -> None:
-        # With liveness on, every status requests a keepalive back, so a
-        # healthy connection has inbound traffic every status_interval and
-        # silence beyond liveness_timeout means the link or walsender is
-        # dead. abort() breaks the supervisor's blocked read -> reconnect.
-        # Snapshot once: a runtime mutation of the public attribute must not
-        # half-apply (probe without abort, or the reverse).
-        liveness = self.liveness_timeout
-        while True:
-            await asyncio.sleep(self._status_interval)
-            idle = time.monotonic() - self.last_inbound
-            if liveness is not None and idle > liveness:
-                self.log.warning("no server traffic for %.1fs; aborting connection", idle)
-                conn.abort()
-                return
-            try:
-                await conn.send_standby_status(self._last_lsn, reply=liveness is not None)
-            except Exception as exc:
-                self.log.debug("standby status send failed: %s", exc)
-                return
+        await StatusFeedback(
+            conn=conn,
+            interval=self._status_interval,
+            liveness=self.liveness_timeout,
+            lsn=lambda: self._last_lsn,
+            idle=lambda: time.monotonic() - self.last_inbound,
+            log=self.log,
+        ).run()
