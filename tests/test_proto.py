@@ -306,7 +306,7 @@ async def test_simple_query_ignores_result_rows() -> None:
         await read_frame(reader)
         writer.write(
             msg(b"T", b"\x00\x01")  # RowDescription (content irrelevant, skipped)
-            + msg(b"D", b"\x00\x01")  # DataRow
+            + data_row(b"1")  # DataRow, parsed then discarded
             + command_complete("SELECT 1")
             + ready_for_query()
         )

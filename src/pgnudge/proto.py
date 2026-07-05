@@ -46,6 +46,14 @@ class PgServerError(Exception):
         self.fields = fields
         super().__init__(f"{fields.get('S', 'ERROR')} {fields.get('C', '?????')}: {fields.get('M', 'unknown')}")
 
+    @classmethod
+    def from_wire(cls, body: bytes) -> Self:
+        return cls(_parse_error(body))
+
+    @classmethod
+    def from_message(cls, message: str) -> Self:
+        return cls({"M": message})
+
 
 @dataclass(frozen=True, slots=True)
 class XLogData:
@@ -58,6 +66,14 @@ class XLogData:
 class Keepalive:
     end_lsn: int
     reply_requested: bool
+
+
+@dataclass(frozen=True, slots=True)
+class BackendMessage:
+    """One backend protocol frame: type byte and body."""
+
+    mtype: bytes
+    body: bytes
 
 
 def _parse_error(body: bytes) -> dict[str, str]:
@@ -166,66 +182,63 @@ class WalsenderConnection:
 
         scram: ScramClient | None = None
         while True:
-            mtype, mbody = await self._read_message()
-            if mtype == b"R":
-                (code,) = struct.unpack("!i", mbody[:4])
+            msg = await self._read_message()
+            if msg.mtype == b"R":
+                (code,) = struct.unpack("!i", msg.body[:4])
                 if code == 0:  # AuthenticationOk
                     break
                 if code == 3:  # CleartextPassword
                     if not self.tls:
-                        raise PgServerError(
-                            {
-                                "M": "refusing cleartext password on an unencrypted connection; "
-                                "enable ssl= or use SCRAM-SHA-256"
-                            }
+                        raise PgServerError.from_message(
+                            "refusing cleartext password on an unencrypted connection; "
+                            "enable ssl= or use SCRAM-SHA-256"
                         )
                     if password is None:
-                        raise PgServerError({"M": "server requested a password but none was given"})
+                        raise PgServerError.from_message("server requested a password but none was given")
                     self._write_message(b"p", password.encode() + b"\x00")
                     await self._writer.drain()
                 elif code == 10:  # SASL
-                    mechanisms = [m.decode() for m in mbody[4:].split(b"\x00") if m]
+                    mechanisms = [m.decode() for m in msg.body[4:].split(b"\x00") if m]
                     plain = [m for m in mechanisms if not m.endswith("-PLUS")]
                     if not plain or password is None:
-                        raise PgServerError({"M": f"unsupported SASL mechanisms {mechanisms} or missing password"})
+                        raise PgServerError.from_message(f"unsupported SASL mechanisms {mechanisms} or missing password")
                     scram = ScramClient(plain, user, password)
                     first = scram.get_client_first().encode()
                     self._write_message(b"p", scram.mechanism_name.encode() + b"\x00" + struct.pack("!i", len(first)) + first)
                     await self._writer.drain()
                 elif code == 11:  # SASLContinue
                     if scram is None:
-                        raise PgServerError({"M": "server sent SASLContinue before SASL"})
-                    scram.set_server_first(mbody[4:].decode())
+                        raise PgServerError.from_message("server sent SASLContinue before SASL")
+                    scram.set_server_first(msg.body[4:].decode())
                     self._write_message(b"p", scram.get_client_final().encode())
                     await self._writer.drain()
                 elif code == 12:  # SASLFinal
                     if scram is None:
-                        raise PgServerError({"M": "server sent SASLFinal before SASL"})
-                    scram.set_server_final(mbody[4:].decode())
+                        raise PgServerError.from_message("server sent SASLFinal before SASL")
+                    scram.set_server_final(msg.body[4:].decode())
                 else:
-                    raise PgServerError({"M": f"unsupported authentication request (code {code}); pgnudge speaks trust, cleartext and SCRAM-SHA-256"})
-            elif mtype == b"E":
-                raise PgServerError(_parse_error(mbody))
+                    raise PgServerError.from_message(f"unsupported authentication request (code {code}); pgnudge speaks trust, cleartext and SCRAM-SHA-256")
+            elif msg.mtype == b"E":
+                raise PgServerError.from_wire(msg.body)
             else:  # NoticeResponse etc.
                 continue
 
         while True:  # post-auth: BackendKeyData / ReadyForQuery ('S' ParameterStatus skipped)
-            mtype, mbody = await self._read_message()
-            if mtype == b"K":
-                self.backend_pid = struct.unpack("!i", mbody[:4])[0]
-            elif mtype == b"Z":
+            msg = await self._read_message()
+            if msg.mtype == b"K":
+                self.backend_pid = struct.unpack("!i", msg.body[:4])[0]
+            elif msg.mtype == b"Z":
                 return
-            elif mtype == b"E":
-                raise PgServerError(_parse_error(mbody))
+            elif msg.mtype == b"E":
+                raise PgServerError.from_wire(msg.body)
 
     # -- framing ---------------------------------------------------------------
 
-    async def _read_message(self) -> tuple[bytes, bytes]:
+    async def _read_message(self) -> BackendMessage:
         header = await self._reader.readexactly(5)
-        mtype = header[:1]
         (length,) = struct.unpack("!i", header[1:5])
         body = await self._reader.readexactly(length - 4)
-        return mtype, body
+        return BackendMessage(mtype=header[:1], body=body)
 
     def _write_message(self, mtype: bytes, body: bytes) -> None:
         self._writer.write(mtype + struct.pack("!i", 4 + len(body)) + body)
@@ -234,45 +247,34 @@ class WalsenderConnection:
 
     async def simple_query(self, sql: str) -> None:
         """Run a command and drain to ReadyForQuery; result rows are ignored."""
-        self._write_message(b"Q", sql.encode() + b"\x00")
-        await self._writer.drain()
-        error: dict[str, str] | None = None
-        while True:
-            mtype, mbody = await self._read_message()
-            if mtype == b"E":
-                error = _parse_error(mbody)
-            elif mtype == b"Z":
-                if error is not None:
-                    raise PgServerError(error)
-                return
-            # 'T' RowDescription, 'D' DataRow, 'C' CommandComplete, 'N' Notice: skipped
+        await self.simple_query_rows(sql)
 
     async def simple_query_rows(self, sql: str) -> list[tuple[str | None, ...]]:
         """Run a query and return its DataRow values as text; None for SQL NULL."""
         self._write_message(b"Q", sql.encode() + b"\x00")
         await self._writer.drain()
         rows: list[tuple[str | None, ...]] = []
-        error: dict[str, str] | None = None
+        error: PgServerError | None = None
         while True:
-            mtype, mbody = await self._read_message()
-            if mtype == b"D":
-                (ncols,) = struct.unpack("!H", mbody[:2])
+            msg = await self._read_message()
+            if msg.mtype == b"D":
+                (ncols,) = struct.unpack("!H", msg.body[:2])
                 values: list[str | None] = []
                 offset = 2
                 for _ in range(ncols):
-                    (length,) = struct.unpack("!i", mbody[offset : offset + 4])
+                    (length,) = struct.unpack("!i", msg.body[offset : offset + 4])
                     offset += 4
                     if length < 0:
                         values.append(None)
                     else:
-                        values.append(mbody[offset : offset + length].decode("utf-8", "replace"))
+                        values.append(msg.body[offset : offset + length].decode("utf-8", "replace"))
                         offset += length
                 rows.append(tuple(values))
-            elif mtype == b"E":
-                error = _parse_error(mbody)
-            elif mtype == b"Z":
+            elif msg.mtype == b"E":
+                error = PgServerError.from_wire(msg.body)
+            elif msg.mtype == b"Z":
                 if error is not None:
-                    raise PgServerError(error)
+                    raise error
                 return rows
             # 'T' RowDescription, 'C' CommandComplete, 'N' Notice: skipped
 
@@ -283,28 +285,28 @@ class WalsenderConnection:
         self._write_message(b"Q", command.encode() + b"\x00")
         await self._writer.drain()
         while True:
-            mtype, mbody = await self._read_message()
-            if mtype == b"W":
+            msg = await self._read_message()
+            if msg.mtype == b"W":
                 return
-            if mtype == b"E":
-                raise PgServerError(_parse_error(mbody))
+            if msg.mtype == b"E":
+                raise PgServerError.from_wire(msg.body)
 
     async def read_stream(self) -> XLogData | Keepalive:
         """Read the next replication message. Raises on stream end or error."""
         while True:
-            mtype, mbody = await self._read_message()
-            if mtype == b"d":
-                kind = mbody[:1]
+            msg = await self._read_message()
+            if msg.mtype == b"d":
+                kind = msg.body[:1]
                 if kind == b"w":
-                    start, end, _ts = struct.unpack("!QQQ", mbody[1:25])
-                    return XLogData(start_lsn=start, end_lsn=end, payload=mbody[25:])
+                    start, end, _ts = struct.unpack("!QQQ", msg.body[1:25])
+                    return XLogData(start_lsn=start, end_lsn=end, payload=msg.body[25:])
                 if kind == b"k":
-                    end, _ts, reply = struct.unpack("!QQB", mbody[1:18])
+                    end, _ts, reply = struct.unpack("!QQB", msg.body[1:18])
                     return Keepalive(end_lsn=end, reply_requested=bool(reply))
                 continue  # unknown CopyData subtype
-            if mtype == b"E":
-                raise PgServerError(_parse_error(mbody))
-            if mtype in (b"c", b"C", b"Z"):
+            if msg.mtype == b"E":
+                raise PgServerError.from_wire(msg.body)
+            if msg.mtype in (b"c", b"C", b"Z"):
                 raise ConnectionResetError("replication stream ended")
 
     async def send_standby_status(self, lsn: int, *, reply: bool = False) -> None:
