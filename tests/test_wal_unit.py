@@ -4,7 +4,6 @@ lifecycle against a scripted in-process walsender; no PostgreSQL.
 
 import asyncio
 import logging
-import struct
 import time
 
 import pytest
@@ -16,6 +15,7 @@ from wire import (
     error_response,
     keepalive,
     read_frame,
+    read_standby_status,
     read_startup,
     ready_for_query,
     refused_port,
@@ -296,7 +296,7 @@ class FakeWalsender:
             writer.write(keepalive(20, reply=True))
             await writer.drain()
             _, status = await read_frame(reader)  # the standby-status reply
-            self.statuses.append(int(struct.unpack("!Q", status[1:9])[0]))
+            self.statuses.append(read_standby_status(status)[0])
             await asyncio.sleep(0.3)  # let the debounce window close before the stream ends
             writer.write(command_complete("COPY 0") + ready_for_query())
             await writer.drain()

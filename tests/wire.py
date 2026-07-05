@@ -24,6 +24,7 @@ __all__ = [
     "keepalive",
     "read_startup",
     "read_frame",
+    "read_standby_status",
     "scripted_server",
     "refused_port",
 ]
@@ -93,6 +94,14 @@ async def read_frame(reader: asyncio.StreamReader) -> tuple[bytes, bytes]:
     header = await reader.readexactly(5)
     (length,) = struct.unpack("!i", header[1:5])
     return header[:1], await reader.readexactly(int(length) - 4)
+
+
+def read_standby_status(body: bytes) -> tuple[int, int, int, bool]:
+    """Fields of a StandbyStatusUpdate CopyData body:
+    (written, flushed, applied, reply_requested)."""
+    assert body[:1] == b"r"
+    written, flushed, applied = struct.unpack("!QQQ", body[1:25])
+    return written, flushed, applied, body[33:34] == b"\x01"
 
 
 @contextlib.asynccontextmanager

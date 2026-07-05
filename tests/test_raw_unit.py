@@ -7,7 +7,6 @@ the whole path from wire frame to Batch is exercised byte-exactly.
 
 import asyncio
 import logging
-import struct
 import time
 
 import pytest
@@ -16,10 +15,12 @@ from wire import (
     auth_request,
     backend_key,
     command_complete,
+    copy_both_response,
     data_row,
     keepalive,
     msg,
     read_frame,
+    read_standby_status,
     read_startup,
     ready_for_query,
     refused_port,
@@ -50,10 +51,6 @@ def raw_feed(port: int, *, tables: list[str] | None = None) -> RawFeed:
         debounce=0.05,
         backoff=(0.01, 0.05),
     )
-
-
-def copy_both_response() -> bytes:
-    return msg(b"W", b"\x00\x00\x00")
 
 
 def identify_system(timeline: int, lsn: int) -> bytes:
@@ -145,7 +142,7 @@ class FakePhysicalWalsender:
             writer.write(keepalive(wal.pos + 0x1000, reply=True))
             await writer.drain()
             _, status = await read_frame(reader)
-            self.statuses.append(int(struct.unpack("!Q", status[1:9])[0]))
+            self.statuses.append(read_standby_status(status)[0])
             await asyncio.sleep(0.3)  # let the debounce window close before the stream ends
             writer.write(command_complete("COPY 0") + ready_for_query())
             await writer.drain()

@@ -7,15 +7,23 @@ postgres:16 + apt postgresql-16-wal2json, see ci.yml), PGNUDGE_TLS=1
 (external server has TLS).
 """
 
+import asyncio
 import os
 import uuid
 from collections.abc import AsyncGenerator, Iterator
 from dataclasses import dataclass
+from typing import TypeVar
 from urllib.parse import urlparse
 
 import asyncpg
 import pytest
 from testcontainers.postgres import PostgresContainer
+
+from pgnudge import Batch, Resync
+from pgnudge.engine import BaseFeed
+
+# module-level by necessity: a generic function needs a TypeVar on 3.11
+T = TypeVar("T", bound=Resync | Batch)
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,3 +129,22 @@ async def admin(pg: PgParams) -> AsyncGenerator[asyncpg.Connection]:
         yield conn
     finally:
         await conn.close()
+
+
+async def expect(feed: BaseFeed, kind: type[T], timeout: float = 8.0) -> T:
+    item = await asyncio.wait_for(anext(feed), timeout)
+    assert isinstance(item, kind), f"expected {kind.__name__}, got {item!r}"
+    return item
+
+
+async def expect_quiet(feed: BaseFeed, seconds: float) -> None:
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(anext(feed), seconds)
+
+
+async def create_tables(admin: asyncpg.Connection) -> None:
+    await admin.execute("""
+        CREATE TABLE stations (id int PRIMARY KEY, name text NOT NULL, paused bool NOT NULL DEFAULT false);
+        CREATE TABLE picks (id serial PRIMARY KEY, station_id int NOT NULL, status text NOT NULL DEFAULT 'pending');
+        INSERT INTO stations VALUES (1, 'st-1', false), (2, 'st-2', false);
+    """)

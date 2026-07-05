@@ -6,7 +6,6 @@ wire protocol, one scripted handler per test.
 
 import asyncio
 import ssl
-import struct
 from typing import cast
 
 import pytest
@@ -21,6 +20,7 @@ from wire import (
     msg,
     notice_response,
     read_frame,
+    read_standby_status,
     read_startup,
     ready_for_query,
     scripted_server,
@@ -192,51 +192,24 @@ async def test_cleartext_request_without_password_raises() -> None:
         conn.abort()
 
 
-async def test_unsupported_auth_code_raises() -> None:
+@pytest.mark.parametrize(
+    ("auth", "match"),
+    [
+        pytest.param(auth_request(5, b"\x01\x02\x03\x04"), "code 5", id="md5-deliberately-absent"),
+        pytest.param(auth_request(10, b"SCRAM-SHA-256-PLUS\x00\x00"), "unsupported SASL", id="only-plus-mechanisms"),
+        pytest.param(auth_request(11, b"r=nope"), "SASLContinue before SASL", id="continue-with-no-exchange"),
+        pytest.param(auth_request(12, b"v=nope"), "SASLFinal before SASL", id="final-with-no-exchange"),
+    ],
+)
+async def test_unacceptable_auth_request_raises(auth: bytes, match: str) -> None:
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         await read_startup(reader)
-        writer.write(auth_request(5, b"\x01\x02\x03\x04"))  # MD5, deliberately absent
+        writer.write(auth)
         await writer.drain()
         await reader.read()
 
     async with scripted_server(handler) as (host, port):
-        with pytest.raises(PgServerError, match="code 5"):
-            await connect(host, port, password="pw")
-
-
-async def test_sasl_with_only_plus_mechanisms_raises() -> None:
-    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        await read_startup(reader)
-        writer.write(auth_request(10, b"SCRAM-SHA-256-PLUS\x00\x00"))
-        await writer.drain()
-        await reader.read()
-
-    async with scripted_server(handler) as (host, port):
-        with pytest.raises(PgServerError, match="unsupported SASL"):
-            await connect(host, port, password="pw")
-
-
-async def test_sasl_continue_before_sasl_raises() -> None:
-    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        await read_startup(reader)
-        writer.write(auth_request(11, b"r=nope"))  # SASLContinue with no SASL exchange open
-        await writer.drain()
-        await reader.read()
-
-    async with scripted_server(handler) as (host, port):
-        with pytest.raises(PgServerError, match="SASLContinue before SASL"):
-            await connect(host, port, password="pw")
-
-
-async def test_sasl_final_before_sasl_raises() -> None:
-    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        await read_startup(reader)
-        writer.write(auth_request(12, b"v=nope"))  # SASLFinal with no SASL exchange open
-        await writer.drain()
-        await reader.read()
-
-    async with scripted_server(handler) as (host, port):
-        with pytest.raises(PgServerError, match="SASLFinal before SASL"):
+        with pytest.raises(PgServerError, match=match):
             await connect(host, port, password="pw")
 
 
@@ -436,15 +409,14 @@ async def test_read_stream_raises_on_server_error() -> None:
 
 
 async def test_send_standby_status_acknowledges_lsn_three_ways() -> None:
-    got: list[bytes] = []
+    got: list[tuple[bytes, bytes]] = []
     received = asyncio.Event()
 
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         await read_startup(reader)
         writer.write(trust_handshake())
         await writer.drain()
-        mtype, body = await read_frame(reader)
-        got.append(mtype + body)
+        got.append(await read_frame(reader))
         received.set()
         await reader.read()
 
@@ -454,23 +426,22 @@ async def test_send_standby_status_acknowledges_lsn_three_ways() -> None:
         await asyncio.wait_for(received.wait(), 2.0)
         conn.abort()
 
-    frame = got[0]
-    assert frame[:2] == b"dr"
-    written, flushed, applied = struct.unpack("!QQQ", frame[2:26])
+    mtype, body = got[0]
+    assert mtype == b"d"
+    written, flushed, applied, reply = read_standby_status(body)
     assert written == flushed == applied == 0x1_0000_002A
-    assert frame[34:35] == b"\x00"  # no reply requested
+    assert reply is False  # no reply requested
 
 
 async def test_send_standby_status_can_request_a_reply() -> None:
-    got: list[bytes] = []
+    got: list[tuple[bytes, bytes]] = []
     received = asyncio.Event()
 
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         await read_startup(reader)
         writer.write(trust_handshake())
         await writer.drain()
-        mtype, body = await read_frame(reader)
-        got.append(mtype + body)
+        got.append(await read_frame(reader))
         received.set()
         await reader.read()
 
@@ -480,7 +451,7 @@ async def test_send_standby_status_can_request_a_reply() -> None:
         await asyncio.wait_for(received.wait(), 2.0)
         conn.abort()
 
-    assert got[0][34:35] == b"\x01"
+    assert read_standby_status(got[0][1]) == (42, 42, 42, True)
 
 
 async def test_send_standby_status_serializes_concurrent_senders() -> None:

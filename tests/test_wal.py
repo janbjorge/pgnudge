@@ -2,20 +2,16 @@
 
 import asyncio
 import ssl
-from typing import TypeVar
 
 import asyncpg
 import pytest
-from conftest import PgParams
+from conftest import PgParams, create_tables, expect, expect_quiet
 
 from pgnudge import Batch, Resync, WalFeed
 
 # live tests are exempt from the 2s budget: the first one pays for the
 # session-scoped container pull + start
 pytestmark = pytest.mark.timeout(300)
-
-# module-level by necessity: a generic function needs a TypeVar on 3.11
-T = TypeVar("T", bound=Resync | Batch)
 
 
 def wal_feed(
@@ -37,27 +33,8 @@ def wal_feed(
     )
 
 
-async def expect(feed: WalFeed, kind: type[T], timeout: float = 8.0) -> T:
-    item = await asyncio.wait_for(anext(feed), timeout)
-    assert isinstance(item, kind), f"expected {kind.__name__}, got {item!r}"
-    return item
-
-
-async def expect_quiet(feed: WalFeed, seconds: float) -> None:
-    with pytest.raises(TimeoutError):
-        await asyncio.wait_for(anext(feed), seconds)
-
-
 async def slots(admin: asyncpg.Connection) -> list[asyncpg.Record]:
     return list(await admin.fetch("SELECT slot_name, temporary, active FROM pg_replication_slots"))
-
-
-async def create_tables(admin: asyncpg.Connection) -> None:
-    await admin.execute("""
-        CREATE TABLE stations (id int PRIMARY KEY, name text NOT NULL, paused bool NOT NULL DEFAULT false);
-        CREATE TABLE picks (id serial PRIMARY KEY, station_id int NOT NULL, status text NOT NULL DEFAULT 'pending');
-        INSERT INTO stations VALUES (1, 'st-1', false), (2, 'st-2', false);
-    """)
 
 
 async def test_connect_emits_resync_then_only_a_temp_slot(pg: PgParams, admin: asyncpg.Connection) -> None:

@@ -6,15 +6,13 @@ the pg_waldump oracle that diffs our decoder against PostgreSQL's own
 over a live WAL range.
 """
 
-import asyncio
 import os
 import re
 import uuid
-from typing import TypeVar
 
 import asyncpg
 import pytest
-from conftest import PgParams, allow_replication_connections
+from conftest import PgParams, allow_replication_connections, create_tables, expect, expect_quiet
 from testcontainers.postgres import PostgresContainer
 
 from pgnudge import Batch, RawFeed, Resync
@@ -24,9 +22,6 @@ from pgnudge.xlog import RelChange, XLogWalker
 # live tests are exempt from the 2s budget: the first one pays for the
 # session-scoped container pull + start
 pytestmark = pytest.mark.timeout(300)
-
-# module-level by necessity: a generic function needs a TypeVar on 3.11
-T = TypeVar("T", bound=Resync | Batch)
 
 
 def raw_feed(pg: PgParams, *, tables: list[str] | None = None) -> RawFeed:
@@ -41,27 +36,8 @@ def raw_feed(pg: PgParams, *, tables: list[str] | None = None) -> RawFeed:
     )
 
 
-async def expect(feed: RawFeed, kind: type[T], timeout: float = 8.0) -> T:
-    item = await asyncio.wait_for(anext(feed), timeout)
-    assert isinstance(item, kind), f"expected {kind.__name__}, got {item!r}"
-    return item
-
-
-async def expect_quiet(feed: RawFeed, seconds: float) -> None:
-    with pytest.raises(TimeoutError):
-        await asyncio.wait_for(anext(feed), seconds)
-
-
 async def slots(admin: asyncpg.Connection) -> list[asyncpg.Record]:
     return list(await admin.fetch("SELECT slot_name FROM pg_replication_slots"))
-
-
-async def create_tables(admin: asyncpg.Connection) -> None:
-    await admin.execute("""
-        CREATE TABLE stations (id int PRIMARY KEY, name text NOT NULL, paused bool NOT NULL DEFAULT false);
-        CREATE TABLE picks (id serial PRIMARY KEY, station_id int NOT NULL, status text NOT NULL DEFAULT 'pending');
-        INSERT INTO stations VALUES (1, 'st-1', false), (2, 'st-2', false);
-    """)
 
 
 async def test_connect_streams_with_zero_server_objects(pg: PgParams, admin: asyncpg.Connection) -> None:
