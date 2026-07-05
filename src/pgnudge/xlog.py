@@ -9,10 +9,11 @@ and scope: docs/physical-wal.md.
 
 import logging
 import struct
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import ClassVar, TypeAlias
 
-__all__ = ["RelChange", "TxnEnd", "WalEvent", "WalSyncError", "XLogWalker"]
+__all__ = ["CommitGate", "RelChange", "TxnEnd", "WalEvent", "WalSyncError", "XLogWalker"]
 
 
 class WalSyncError(Exception):
@@ -39,6 +40,40 @@ class TxnEnd:
 
 
 WalEvent: TypeAlias = RelChange | TxnEnd
+
+
+@dataclass(slots=True, kw_only=True)
+class CommitGate:
+    """Holds changes per transaction; releases them only at commit.
+
+    Physical WAL carries changes as they are written, before the outcome
+    is known. Releasing at commit keeps parity with logical decoding: no
+    wakeups for rollbacks, no consumer refetch racing an open transaction.
+    """
+
+    max_open: int = 4096
+    pending: dict[int, dict[tuple[int, int], RelChange]] = field(init=False, default_factory=dict)
+
+    log: ClassVar[logging.Logger] = logging.getLogger("pgnudge.xlog")
+
+    def push(self, events: Iterable[WalEvent]) -> list[RelChange]:
+        """Absorb walker events; return changes whose transaction committed."""
+        released: list[RelChange] = []
+        for event in events:
+            if isinstance(event, RelChange):
+                bucket = self.pending.setdefault(event.xid, {})
+                bucket.setdefault((event.db_oid, event.relfilenode), event)
+                if len(self.pending) > self.max_open:
+                    # emit on eviction: a spurious nudge beats a lost one
+                    evicted = next(iter(self.pending))
+                    released.extend(self.pending.pop(evicted).values())
+                    self.log.debug("evicted open transaction %d past max_open=%d", evicted, self.max_open)
+            else:
+                for xid in (event.xid, *event.subxids):
+                    changes = self.pending.pop(xid, None)
+                    if changes is not None and event.committed:
+                        released.extend(changes.values())
+        return released
 
 
 @dataclass(slots=True, kw_only=True)

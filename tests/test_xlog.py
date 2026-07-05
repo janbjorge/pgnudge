@@ -11,7 +11,7 @@ import struct
 
 import pytest
 
-from pgnudge.xlog import RelChange, TxnEnd, WalEvent, WalSyncError, XLogWalker
+from pgnudge.xlog import CommitGate, RelChange, TxnEnd, WalEvent, WalSyncError, XLogWalker
 
 BLCKSZ = 8192
 SEG = 16 * 1024 * 1024
@@ -437,3 +437,55 @@ def test_malformed_xact_subxids_raises() -> None:
     s.add(record(rmid=1, info=0x80, xid=9, main=main))
     with pytest.raises(WalSyncError, match="malformed xact record"):
         walk(s)
+
+
+# -- commit gate ---------------------------------------------------------------------
+
+
+def change(xid: int, relfilenode: int = 16384, kind: str = "insert") -> RelChange:
+    return RelChange(xid=xid, db_oid=5, relfilenode=relfilenode, kind=kind)
+
+
+def test_gate_releases_only_on_commit() -> None:
+    gate = CommitGate()
+    assert gate.push([change(1)]) == []
+    assert gate.push([TxnEnd(xid=1, committed=True)]) == [change(1)]
+    assert gate.pending == {}
+
+
+def test_gate_drops_aborted_transactions() -> None:
+    gate = CommitGate()
+    assert gate.push([change(1), TxnEnd(xid=1, committed=False)]) == []
+    assert gate.pending == {}
+
+
+def test_gate_merges_subtransaction_changes_on_commit() -> None:
+    gate = CommitGate()
+    assert gate.push([change(11, relfilenode=1), change(12, relfilenode=2)]) == []
+    released = gate.push([TxnEnd(xid=10, committed=True, subxids=(11, 12))])
+    assert {c.relfilenode for c in released} == {1, 2}
+
+
+def test_gate_dedups_repeat_changes_within_a_transaction() -> None:
+    gate = CommitGate()
+    gate.push([change(1, kind="insert"), change(1, kind="update"), change(1, kind="delete")])
+    released = gate.push([TxnEnd(xid=1, committed=True)])
+    assert released == [change(1, kind="insert")]  # first change per (db, rel) wins
+
+
+def test_gate_isolates_interleaved_transactions() -> None:
+    gate = CommitGate()
+    gate.push([change(1, relfilenode=1), change(2, relfilenode=2)])
+    assert gate.push([TxnEnd(xid=2, committed=True)]) == [change(2, relfilenode=2)]
+    assert gate.push([TxnEnd(xid=1, committed=False)]) == []
+
+
+def test_gate_ignores_txnend_for_unknown_xid() -> None:
+    assert CommitGate().push([TxnEnd(xid=99, committed=True)]) == []
+
+
+def test_gate_evicts_oldest_open_transaction_as_committed() -> None:
+    gate = CommitGate(max_open=2)
+    released = gate.push([change(1), change(2), change(3)])
+    assert released == [change(1)]  # oldest evicted, emitted rather than lost
+    assert set(gate.pending) == {2, 3}
