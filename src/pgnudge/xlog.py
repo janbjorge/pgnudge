@@ -9,11 +9,20 @@ and scope: docs/physical-wal.md.
 
 import logging
 import struct
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from typing import ClassVar, TypeAlias
 
-__all__ = ["CommitGate", "RelChange", "TxnEnd", "WalEvent", "WalSyncError", "XLogWalker"]
+__all__ = [
+    "CommitGate",
+    "HeaderWalk",
+    "RelChange",
+    "RelFileLocator",
+    "TxnEnd",
+    "WalEvent",
+    "WalSyncError",
+    "XLogWalker",
+]
 
 
 class WalSyncError(Exception):
@@ -40,6 +49,23 @@ class TxnEnd:
 
 
 WalEvent: TypeAlias = RelChange | TxnEnd
+
+
+@dataclass(frozen=True, slots=True)
+class RelFileLocator:
+    """Physical relation identity as WAL block references carry it."""
+
+    spc_oid: int
+    db_oid: int
+    relnumber: int
+
+
+@dataclass(frozen=True, slots=True)
+class HeaderWalk:
+    """Header-walk result: main-fork locator (lowest block) and main-data offset."""
+
+    locator: RelFileLocator | None
+    main_off: int
 
 
 @dataclass(slots=True, kw_only=True)
@@ -144,59 +170,56 @@ class XLogWalker:
 
     def feed(self, data: bytes) -> list[WalEvent]:
         self.buf += data
-        out: list[WalEvent] = []
-        while self.step(out):
-            pass
-        return out
+        return [event for rec in self.records() if (event := self.parse_record(rec)) is not None]
 
     def consume(self, n: int) -> None:
         del self.buf[:n]
         self.pos += n
 
-    def step(self, out: list[WalEvent]) -> bool:
-        """One state-machine transition; False when more input is needed."""
-        if not self.buf:
-            return False
-        if self.raw_skip:  # zero fill after XLOG_SWITCH: no page headers inside
-            take = min(self.raw_skip, len(self.buf))
-            self.consume(take)
-            self.raw_skip -= take
-            return True
-        if self.pos % self.BLCKSZ == 0:
-            return self.take_page_header()
-        avail = min(len(self.buf), self.BLCKSZ - self.pos % self.BLCKSZ)
-        if self.skip:
-            take = min(self.skip, avail)
-            self.consume(take)
-            self.skip -= take
-            return True
-        if self.rec is None:
-            pad = (-self.pos) % self.ALIGN
-            if pad:
-                self.skip = pad
-                return True
-            self.rec = bytearray()
-            self.rec_need = None
-        if self.rec_need is None:
-            take = min(4 - len(self.rec), avail)
+    def records(self) -> Iterator[bytes]:
+        """Drain complete records from the buffer; return when more input is needed."""
+        while self.buf:
+            if self.raw_skip:  # zero fill after XLOG_SWITCH: no page headers inside
+                take = min(self.raw_skip, len(self.buf))
+                self.consume(take)
+                self.raw_skip -= take
+                continue
+            if self.pos % self.BLCKSZ == 0:
+                if not self.take_page_header():
+                    return
+                continue
+            avail = min(len(self.buf), self.BLCKSZ - self.pos % self.BLCKSZ)
+            if self.skip:
+                take = min(self.skip, avail)
+                self.consume(take)
+                self.skip -= take
+                continue
+            if self.rec is None:
+                pad = (-self.pos) % self.ALIGN
+                if pad:
+                    self.skip = pad
+                    continue
+                self.rec = bytearray()
+                self.rec_need = None
+            if self.rec_need is None:
+                take = min(4 - len(self.rec), avail)
+                self.rec += self.buf[:take]
+                self.consume(take)
+                if len(self.rec) == 4:
+                    (tot_len,) = struct.unpack_from("<I", self.rec)
+                    if tot_len < self.REC_HDR or tot_len > self.MAX_RECORD:
+                        raise WalSyncError(f"implausible record length {tot_len} at 0x{self.pos:X}")
+                    self.rec_need = tot_len
+                continue
+            take = min(self.rec_need - len(self.rec), avail)
             self.rec += self.buf[:take]
             self.consume(take)
-            if len(self.rec) == 4:
-                (tot_len,) = struct.unpack("<I", bytes(self.rec))
-                if tot_len < self.REC_HDR or tot_len > self.MAX_RECORD:
-                    raise WalSyncError(f"implausible record length {tot_len} at 0x{self.pos:X}")
-                self.rec_need = tot_len
-            return True
-        take = min(self.rec_need - len(self.rec), avail)
-        self.rec += self.buf[:take]
-        self.consume(take)
-        if len(self.rec) == self.rec_need:
-            record = bytes(self.rec)
-            self.rec = None
-            self.rec_need = None
-            if self.pos > self.emit_from:
-                self.parse_record(record, out)
-        return True
+            if len(self.rec) == self.rec_need:
+                record = bytes(self.rec)
+                self.rec = None
+                self.rec_need = None
+                if self.pos > self.emit_from:
+                    yield record
 
     def take_page_header(self) -> bool:
         size = self.LONG_PHD if self.pos % self.seg_size == 0 else self.SHORT_PHD
@@ -226,38 +249,36 @@ class XLogWalker:
 
     # -- record parsing ------------------------------------------------------------
 
-    def parse_record(self, rec: bytes, out: list[WalEvent]) -> None:
+    def parse_record(self, rec: bytes) -> WalEvent | None:
         _tot_len, xid, _prev, info, rmid = struct.unpack_from("<IIQBB", rec)
         op = info & 0x70
         if rmid == self.RM_XACT:
-            self.parse_xact(rec, xid, info, out)
-        elif rmid == self.RM_HEAP and op in self.HEAP_KINDS:
-            self.emit_main_fork_change(rec, xid, self.HEAP_KINDS[op], out)
-        elif rmid == self.RM_HEAP2 and op == self.HEAP2_MULTI_INSERT:
-            self.emit_main_fork_change(rec, xid, "multi_insert", out)
-        elif rmid == self.RM_XLOG and op == self.XLOG_SWITCH:
+            return self.parse_xact(rec, xid, info, op)
+        if rmid == self.RM_HEAP and op in self.HEAP_KINDS:
+            return self.parse_heap(rec, xid, self.HEAP_KINDS[op])
+        if rmid == self.RM_HEAP2 and op == self.HEAP2_MULTI_INSERT:
+            return self.parse_heap(rec, xid, "multi_insert")
+        if rmid == self.RM_XLOG and op == self.XLOG_SWITCH:
             # rest of the segment is zero padding without page headers
             self.raw_skip = (-self.pos) % self.seg_size
+        return None
 
-    def emit_main_fork_change(self, rec: bytes, xid: int, kind: str, out: list[WalEvent]) -> None:
-        locator, _main_off, _main_len = self.walk_headers(rec)
-        if locator is not None:
-            _spc_oid, db_oid, relnumber = locator
-            out.append(RelChange(xid=xid, db_oid=db_oid, relfilenode=relnumber, kind=kind))
+    def parse_heap(self, rec: bytes, xid: int, kind: str) -> RelChange | None:
+        locator = self.walk_headers(rec).locator
+        if locator is None:
+            return None
+        return RelChange(xid=xid, db_oid=locator.db_oid, relfilenode=locator.relnumber, kind=kind)
 
-    def parse_xact(self, rec: bytes, xid: int, info: int, out: list[WalEvent]) -> None:
-        op = info & 0x70
+    def parse_xact(self, rec: bytes, xid: int, info: int, op: int) -> TxnEnd | None:
         if op == self.XACT_PREPARE:
             # emit at PREPARE time: a spurious nudge on a later rollback is
             # acceptable, a nudge stranded until eviction is not
-            out.append(TxnEnd(xid=xid, committed=True))
-            return
+            return TxnEnd(xid=xid, committed=True)
         if op not in (self.XACT_COMMIT, self.XACT_ABORT):
-            return
-        _locator, main_off, main_len = self.walk_headers(rec)
+            return None
+        main = rec[self.walk_headers(rec).main_off :]
         subxids: tuple[int, ...] = ()
-        if info & self.XACT_HAS_INFO and main_len >= 12:
-            main = rec[main_off : main_off + main_len]
+        if info & self.XACT_HAS_INFO and len(main) >= 12:
             try:
                 (xinfo,) = struct.unpack_from("<I", main, 8)  # follows the 8-byte xact_time
                 offset = 12
@@ -269,17 +290,16 @@ class XLogWalker:
                     subxids = struct.unpack_from(f"<{count}I", main, offset)
             except struct.error as exc:
                 raise WalSyncError(f"malformed xact record: {exc}") from exc
-        out.append(TxnEnd(xid=xid, committed=op == self.XACT_COMMIT, subxids=subxids))
+        return TxnEnd(xid=xid, committed=op == self.XACT_COMMIT, subxids=subxids)
 
-    def walk_headers(self, rec: bytes) -> tuple[tuple[int, int, int] | None, int, int]:
-        """Walk the block-reference headers; return (main-fork locator of the
-        lowest block, main-data offset, main-data length)."""
+    def walk_headers(self, rec: bytes) -> HeaderWalk:
+        """Walk the block-reference headers of one record."""
         offset = self.REC_HDR
         remaining = len(rec) - offset
         datatotal = 0
         main_len = 0
-        locator: tuple[int, int, int] | None = None
-        last: tuple[int, int, int] | None = None
+        locator: RelFileLocator | None = None
+        last: RelFileLocator | None = None
         try:
             while remaining > datatotal:
                 block_id = rec[offset]
@@ -324,7 +344,7 @@ class XLogWalker:
                         spc_oid, db_oid, relnumber = struct.unpack_from("<III", rec, offset)
                         offset += 12
                         remaining -= 12
-                        this = (spc_oid, db_oid, relnumber)
+                        this = RelFileLocator(spc_oid=spc_oid, db_oid=db_oid, relnumber=relnumber)
                     offset += 4  # BlockNumber
                     remaining -= 4
                     last = this
@@ -336,4 +356,4 @@ class XLogWalker:
             raise WalSyncError(f"malformed record header: {exc}") from exc
         if remaining != datatotal:
             raise WalSyncError("record header walk overran the data area")
-        return locator, len(rec) - main_len, main_len
+        return HeaderWalk(locator=locator, main_off=len(rec) - main_len)

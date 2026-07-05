@@ -152,6 +152,14 @@ def test_heap_insert_yields_relchange() -> None:
     assert walk(s) == [RelChange(xid=77, db_oid=5, relfilenode=16384, kind="insert")]
 
 
+def test_parse_record_returns_the_event_directly() -> None:
+    """Leaf contract: parse_record returns the record's event, or None."""
+    walker = XLogWalker(start_lsn=start_lsn())
+    assert walker.parse_record(heap_insert(xid=9)) == RelChange(xid=9, db_oid=5, relfilenode=16384, kind="insert")
+    assert walker.parse_record(commit(xid=9)) == TxnEnd(xid=9, committed=True)
+    assert walker.parse_record(record(rmid=3, info=0x00)) is None  # unhandled resource manager
+
+
 @pytest.mark.parametrize(
     ("info", "kind"),
     [(0x10, "delete"), (0x20, "update"), (0x40, "hot_update")],
