@@ -29,11 +29,12 @@ violating one, stop and raise it first.
 2. **Native Postgres only.** No external CDC systems, brokers, or sidecars
    beyond an optional bridge daemon that is itself just this library.
 3. **Zero server persistence.** Nothing created on the server may outlive
-   the connection. The only primitive in all of PostgreSQL that satisfies
-   this for a change feed is the **temporary replication slot** ("not saved
-   to disk, automatically dropped on error or when the session has
-   finished"). Triggers are persistent catalog objects and fail this law by
-   definition; do not add a trigger path.
+   the connection. Two primitives satisfy this for a change feed: the
+   **temporary replication slot** ("not saved to disk, automatically
+   dropped on error or when the session has finished", the WalFeed
+   transport) and **slot-less physical streaming** (no server object at
+   any point, the RawFeed transport). Triggers are persistent catalog
+   objects and fail this law by definition; do not add a trigger path.
 4. **Driver-free.** The replication transport is a hand-rolled walsender
    client (`proto.py`, stdlib + scramp), because no Python library outside
    psycopg2 speaks the replication protocol (asyncpg issue #91 has been
@@ -88,6 +89,16 @@ src/pgnudge/
               Event is payload/first_seen/count. `channel` and
               `payload_filter` were dropped before release; do not
               reintroduce them.
+  xlog.py     Sans-io physical-WAL walker: XLogWalker (page framing,
+              record reassembly, heap/heap2 change extraction via block
+              references, xact commit/abort/prepare with subxids,
+              XLOG_SWITCH zero-fill; emit_from suppresses pre-attach
+              records), CommitGate (per-xid buffer, release on commit,
+              drop on abort, emit on eviction). Parses record headers
+              ONLY; row payloads/CRCs are skipped by length, never
+              decoded. Header layouts stable since PG 9.5; unknown page
+              magic warns once. Little-endian servers only. The live
+              pg_waldump oracle test validates every struct offset.
   engine.py   The machinery, one dataclass per concern, pure stdlib:
               Wakeup (one raw arrival, pre-coalescing),
               Intake (bounded wakeup buffer, overflow flag),
@@ -98,6 +109,18 @@ src/pgnudge/
               tasks/failsafe/shutdown), BaseFeed (thin async-iterator
               facade; subclass hooks _supervisor/_extra_close). Unit-tested
               without PostgreSQL in tests/test_engine.py.
+  raw.py      RawFeed(BaseFeed): the physical transport, slot-less, works
+              at wal_level=replica. Supervisor pairs a physical stream
+              connection with a catalog connection (replication=database
+              mode accepts plain SQL; still driver-free). IDENTIFY_SYSTEM
+              -> page-floored start, pg_current_wal_insert_lsn() as the
+              from-connect watermark (flush is NOT enough under async
+              commit), walker -> CommitGate -> RelResolver (relfilenode ->
+              schema.table, cached, event-driven lookups, system schemas
+              cache as drops) -> same Resync|Batch contract. tables=
+              filters client-side. TRUNCATE not detected (documented gap).
+              Needs a pg_hba `replication` entry (host all does not match
+              physical replication).
   wal.py      WalFeed(BaseFeed): the transport. Supervisor creates a fresh
               TEMPORARY slot per (re)connect (name: pgnudge_<pid>_<hex>),
               SNAPSHOT 'nothing', starts replication at 0/0, emits Resync
@@ -121,6 +144,20 @@ tests/
   test_engine.py  unit tests for the engine classes (Intake, Coalescer,
                Debouncer, Backoff, FeedService, BaseFeed via a FakeFeed),
                pure asyncio, no PostgreSQL.
+  test_xlog.py  XLogWalker/CommitGate unit tests against synthetic WAL
+               built by a miniature writer (WalStream: page headers,
+               continuation flags, alignment), byte-exact framing edge
+               cases, no PostgreSQL.
+  test_raw_unit.py  RawFeed unit tests, no PostgreSQL: RelResolver cache
+               semantics, full lifecycle against a scripted physical
+               walsender + catalog backend (WAL fixture bytes from
+               test_xlog's WalStream), desync/reconnect, tables filter.
+  test_raw.py  live RawFeed proofs: zero slots while streaming, commit
+               gating (open txn quiet, rollback never), vacuum/checkpoint/
+               truncate silence, cross-database isolation, VACUUM FULL
+               remap, stock wal_level=replica container, and the
+               pg_waldump oracle (our decoder vs the server's own over a
+               live WAL range; must match exactly).
   wire.py      shared wire-protocol helpers for the fake-walsender tests:
                backend frame builders, frontend frame readers, a
                scripted_server() harness on an ephemeral localhost port.
@@ -389,12 +426,23 @@ connected; no backfill; client-side coalescing (50-row txn -> one Event,
 count=50); kill -> fresh slot, old auto-dropped; hard abort ->
 `pg_replication_slots` empty; wheel installs and passes from site-packages.
 
+Proven live for RawFeed (PG 17): zero server objects while streaming;
+commit gating (open transaction quiet until COMMIT, rollback never
+nudges); vacuum/checkpoint/truncate silence; cross-database isolation;
+VACUUM FULL relfilenode remap; end-to-end on a stock wal_level=replica
+container; decoder matches pg_waldump exactly over a live WAL range.
+
 Untested / absent: `ssl=True` verify-full against a real managed endpoint
 (note: replication traffic bypasses built-in poolers on managed platforms,
 connect to the direct port); MD5 auth (deliberately absent); pgoutput (see
 the publications warning above); behavior under a long-running write
 transaction at connect (slot creation waits: connect latency, never
-history); PG 18 (in the CI matrix, not yet run).
+history); PG 18 (in the CI matrix, not yet run; a new WAL page magic will
+warn once and the oracle test will catch real decode drift); whether Azure
+Flexible Server permits external START_REPLICATION PHYSICAL at all
+(the make-or-break question for RawFeed on that platform; ten-minute
+smoke test with psql, see docs/physical-wal.md); big-endian servers
+(unsupported by the walker, deliberately).
 
 ## Backlog, priority order
 
@@ -405,7 +453,10 @@ history); PG 18 (in the CI matrix, not yet run).
    keep v1 the default, document the coalescing trade (dedup granularity
    changes).
 3. Managed-platform end-to-end validation (verify-full TLS, direct port,
-   wal2json preinstalled); needs real infrastructure.
+   wal2json preinstalled; for RawFeed: does the platform allow external
+   physical streaming); needs real infrastructure.
+4. TRUNCATE detection heuristic for RawFeed (catalog-update tracking);
+   ship only if the false-positive story is clean.
 
 ## Release checklist
 

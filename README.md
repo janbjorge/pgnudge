@@ -76,6 +76,48 @@ The full mechanics (logical decoding, temporary-slot semantics, the
 gap-free handshake argument, and when not to use pgnudge) are in
 [docs/temporary-slots.md](docs/temporary-slots.md).
 
+## Two transports, one contract
+
+Both feeds yield the same `Resync | Batch` stream; pick by what your
+server allows.
+
+|                   | `WalFeed` (logical decoding)       | `RawFeed` (physical WAL)                 |
+|-------------------|------------------------------------|------------------------------------------|
+| `wal_level`       | `logical` (usually needs a restart)| `replica`, the stock default             |
+| Output plugin     | wal2json or test_decoding          | none; WAL is decoded client-side         |
+| Server objects    | one TEMPORARY slot while connected | none at any point, not even a slot       |
+| `TRUNCATE` nudges | yes                                | no (documented gap)                      |
+| Stream scope      | one database, filtered server-side | whole cluster, filtered client-side      |
+
+`RawFeed` exists for servers where `wal_level=logical` is not on the
+table: managed defaults, change-averse ops, no restart window. It
+streams raw physical WAL **slot-less** and parses record headers
+client-side, just enough to answer *which relation changed*, never row
+contents. Nudges are commit-gated: a change is delivered only after its
+transaction's commit record, so rollbacks never nudge and a refetch
+never races an open transaction. The start position is the server's
+current WAL insert point, so from-connect-only holds exactly as it does
+for `WalFeed`.
+
+```python
+from pgnudge import RawFeed
+
+feed = RawFeed(
+    host="db.example.com", user="wal_user", password=..., database="app",
+    tables=["public.orders", "public.stations"],  # client-side filter
+)
+```
+
+Costs, stated honestly: the server sends the whole cluster's WAL to the
+client (every database, index churn, vacuum traffic); pgnudge filters
+client-side, but the bandwidth is paid. `TRUNCATE` is not detected at
+`wal_level=replica` (the WAL carries no reliable signature for it; the
+next write to the table nudges normally). `RawFeed` also opens a second,
+plain connection for catalog lookups (relfilenode to table name), and
+`pg_hba.conf` needs a `replication` entry for the role, because physical
+replication matches the `replication` pseudo-database, not `all`.
+Mechanics in [docs/physical-wal.md](docs/physical-wal.md).
+
 ## The contract
 
 A feed yields exactly two item types:
@@ -105,9 +147,10 @@ connect, but it never causes history to be delivered.)
 client-side into one `Event` with a `count`. A 500-row transaction on one
 table is one `Event`, `count=500`, one wakeup, one refetch.
 
-`INSERT`, `UPDATE`, `DELETE`, and `TRUNCATE` all nudge. Logical decoding
-does not carry other DDL, so schema changes don't; pair migrations with a
-refetch if your view depends on them.
+`INSERT`, `UPDATE`, `DELETE`, and `TRUNCATE` all nudge on `WalFeed`
+(`RawFeed` covers all but `TRUNCATE`). Neither transport carries other
+DDL, so schema changes don't nudge; pair migrations with a refetch if
+your view depends on them.
 
 ## Why not LISTEN/NOTIFY?
 
@@ -144,7 +187,15 @@ slot dies with the bridge.
 - Managed platforms: enabling `wal_level=logical` typically requires a
   restart (once); grant `REPLICATION` to a dedicated role rather than
   widening an app role, since logical decoding sees the whole database's
-  stream.
+  stream. If that restart is off the table, `RawFeed` runs at the stock
+  `wal_level=replica`.
+- A role with `REPLICATION` sees every table's changes through either
+  transport regardless of its SELECT grants; table grants do not scope a
+  change feed. Scope with `tables=` and treat the role as privileged.
+- Physical replication (`RawFeed`) needs a `pg_hba.conf` entry for the
+  `replication` pseudo-database (`host replication <role> ...`); the
+  usual `host all` rules do not match it. Managed platforms generally
+  handle this once the role has `REPLICATION`.
 - Thundering herd: a database restart reconnects every feed at once, and
   every consumer's `Resync` handler refetches at once. Reconnect timing is
   already jittered, but the refetch is your code. Add jitter there when
@@ -167,6 +218,15 @@ writes, client-side coalescing (50-row txn → one `Event`, `count=50`),
 reconnect gets a fresh slot with the old one auto-dropped, TLS + SCRAM over
 an encrypted stream, and the flagship proof: hard socket abort with no
 protocol goodbye leaves `pg_replication_slots` empty.
+
+`RawFeed` gets its own proofs: `pg_replication_slots` stays empty *while
+streaming*, an open transaction never nudges until COMMIT and a rollback
+never nudges at all, VACUUM and CHECKPOINT stay silent, writes in other
+databases stay silent, and an end-to-end run on an untouched
+`wal_level=replica` container. The decoder itself is checked against an
+oracle: the same live WAL range through our client-side walker and
+through `pg_waldump` must produce the identical change sequence, on
+every PostgreSQL major in CI.
 
 ```bash
 uv sync && uv run pytest
