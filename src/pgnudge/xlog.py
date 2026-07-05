@@ -164,11 +164,13 @@ class XLogWalker:
 
     @classmethod
     def page_floor(cls, lsn: int) -> int:
+        """Round ``lsn`` down to a page boundary, the only valid walker start position."""
         return lsn - lsn % cls.BLCKSZ
 
     # -- streaming state machine -------------------------------------------------
 
     def feed(self, data: bytes) -> list[WalEvent]:
+        """Buffer one stream chunk; return events for the records it completed."""
         self.buf += data
         return [event for rec in self.records() if (event := self.parse_record(rec)) is not None]
 
@@ -177,7 +179,16 @@ class XLogWalker:
         self.pos += n
 
     def records(self) -> Iterator[bytes]:
-        """Drain complete records from the buffer; return when more input is needed."""
+        """Drain complete records from the buffer; return when more input is needed.
+
+        Records are 8-byte aligned and interleaved with a page header every
+        BLCKSZ bytes, so a record spanning pages is reassembled across the
+        intervening headers; its total length is read from its first 4
+        bytes, which may themselves straddle a page. ``skip`` crosses
+        alignment padding and the in-flight record tail on the first page;
+        ``raw_skip`` crosses XLOG_SWITCH zero fill, which has no page
+        headers at all.
+        """
         while self.buf:
             if self.raw_skip:  # zero fill after XLOG_SWITCH: no page headers inside
                 take = min(self.raw_skip, len(self.buf))
@@ -222,6 +233,17 @@ class XLogWalker:
                     yield record
 
     def take_page_header(self) -> bool:
+        """Consume one page header; return False until it is fully buffered.
+
+        The header doubles as the framing self-check: the page address must
+        equal the stream position and the continuation flag must agree with
+        whether a record is in flight, otherwise the walker declares desync
+        rather than emit garbage. Long headers (segment start) carry the
+        segment size that places later long headers and XLOG_SWITCH fills.
+        The first page's ``xlp_rem_len`` skips the tail of a record already
+        in flight at ``start_lsn``; that skip is what makes any page-aligned
+        position a valid entry point.
+        """
         size = self.LONG_PHD if self.pos % self.seg_size == 0 else self.SHORT_PHD
         if len(self.buf) < size:
             return False
@@ -250,6 +272,7 @@ class XLogWalker:
     # -- record parsing ------------------------------------------------------------
 
     def parse_record(self, rec: bytes) -> WalEvent | None:
+        """Decode one complete record into an event; None for record types that never nudge."""
         _tot_len, xid, _prev, info, rmid = struct.unpack_from("<IIQBB", rec)
         op = info & 0x70
         if rmid == self.RM_XACT:
@@ -270,6 +293,13 @@ class XLogWalker:
         return RelChange(xid=xid, db_oid=locator.db_oid, relfilenode=locator.relnumber, kind=kind)
 
     def parse_xact(self, rec: bytes, xid: int, info: int, op: int) -> TxnEnd | None:
+        """Decode a transaction outcome, collecting subxids when present.
+
+        The main data of a commit/abort record starts with the 8-byte
+        xact_time; an ``xinfo`` flag word follows only under XACT_HAS_INFO,
+        and each xinfo bit appends its section in a fixed order, so the
+        dbinfo section must be skipped over to reach the subxid array.
+        """
         if op == self.XACT_PREPARE:
             # emit at PREPARE time: a spurious nudge on a later rollback is
             # acceptable, a nudge stranded until eviction is not
@@ -293,7 +323,15 @@ class XLogWalker:
         return TxnEnd(xid=xid, committed=op == self.XACT_COMMIT, subxids=subxids)
 
     def walk_headers(self, rec: bytes) -> HeaderWalk:
-        """Walk the block-reference headers of one record."""
+        """Walk the block-reference headers of one record.
+
+        Headers and data live in separate areas: every block reference and
+        main-data marker declares its payload length up front, and the
+        payloads follow only after the last header. Walking the headers
+        alone therefore yields the main-fork locator and the main-data
+        offset without ever decoding row contents; the final
+        ``remaining != datatotal`` check proves the walk stayed in sync.
+        """
         offset = self.REC_HDR
         remaining = len(rec) - offset
         datatotal = 0

@@ -102,6 +102,7 @@ class WalFeed(BaseFeed):
 
     @staticmethod
     def _parse_wal2json_v2(payload: bytes) -> list[str]:
+        """One format-version-2 message to affected tables; non-change actions parse to []."""
         try:
             obj: object = json.loads(payload)
         except ValueError:
@@ -112,6 +113,7 @@ class WalFeed(BaseFeed):
 
     @classmethod
     def _parse_test_decoding(cls, payload: bytes) -> list[str]:
+        """One test_decoding text line to affected tables; non-DML lines parse to []."""
         # TRUNCATE lists every affected table on one line, ", "-joined
         m = cls._TEST_DECODING_RE.match(payload.decode("utf-8", "replace"))
         return m.group(1).split(", ") if m else []
@@ -139,6 +141,7 @@ class WalFeed(BaseFeed):
     # -- supervisor ---------------------------------------------------------------
 
     async def _supervisor(self) -> None:
+        """Connect, create a fresh TEMPORARY slot, stream until error, back off, repeat."""
         parse = self._parse_wal2json_v2 if self._plugin == "wal2json" else self._parse_test_decoding
         attempt = 0
         first = True

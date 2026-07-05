@@ -36,6 +36,7 @@ def parse_lsn(text: str) -> int:
 
 
 def format_lsn(lsn: int) -> str:
+    """Integer WAL position to ``X/Y`` hex notation."""
     return f"{lsn >> 32:X}/{lsn & 0xFFFFFFFF:X}"
 
 
@@ -77,6 +78,7 @@ class BackendMessage:
 
 
 def _parse_error(body: bytes) -> dict[str, str]:
+    """ErrorResponse body (field-code byte, NUL-terminated text, ... NUL) to a field map."""
     fields: dict[str, str] = {}
     i = 0
     while i < len(body) and body[i : i + 1] != b"\x00":
@@ -130,6 +132,13 @@ class WalsenderConnection:
         connect_timeout: float = 10.0,
         replication: str = "database",
     ) -> Self:
+        """Open a socket, optionally upgrade to TLS, and authenticate.
+
+        The SSLRequest exchange precedes the startup packet: one request,
+        one ``S`` byte back, then ``start_tls`` on the same transport.
+        Every phase is bounded by ``connect_timeout``, and any failure
+        closes the socket before re-raising.
+        """
         reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), connect_timeout)
         if ssl:
             try:
@@ -169,6 +178,13 @@ class WalsenderConnection:
         application_name: str,
         replication: str = "database",
     ) -> None:
+        """Send the startup packet and drive authentication to ReadyForQuery.
+
+        Speaks trust, cleartext (refused unless the connection is TLS), and
+        SCRAM-SHA-256; ``-PLUS`` mechanisms are filtered out because channel
+        binding is not implemented. After AuthenticationOk, drains
+        ParameterStatus and BackendKeyData until ReadyForQuery.
+        """
         params = {
             "user": user,
             "database": database,

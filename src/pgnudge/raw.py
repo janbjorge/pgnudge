@@ -47,6 +47,7 @@ class RelResolver:
         self.db_oid = int(rows[0][0])
 
     async def resolve(self, relfilenodes: set[int]) -> dict[int, str]:
+        """Map relfilenodes to ``schema.table``, querying only the unseen ones."""
         unseen = sorted(node for node in relfilenodes if node not in self.names)
         if unseen:
             nodes = ",".join(str(node) for node in unseen)
@@ -154,6 +155,7 @@ class RawFeed(BaseFeed):
         )
 
     async def _supervisor(self) -> None:
+        """Pair a physical stream with a catalog connection; stream, decode, gate, resolve, repeat."""
         attempt = 0
         first = True
         while not self._closing:
