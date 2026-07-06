@@ -21,6 +21,45 @@ Python ≥ 3.11, PostgreSQL ≥ 16. One dependency:
 database driver: pgnudge speaks the PostgreSQL replication protocol
 itself.
 
+## Get started
+
+pgnudge does not auto-detect anything about your server, and you make
+exactly one decision: which feed class. Both yield the identical
+`Resync | Batch` stream, so the choice lives on one line (the
+constructor) and touches nothing else in your code. After that, it just
+works.
+
+The decision is driven by a single server setting, `wal_level`:
+
+- **You can set `wal_level = logical`** → use `WalFeed`. The fuller
+  transport: `TRUNCATE` nudges too, the server filters tables for you,
+  and only your database's WAL is decoded. Costs a one-time restart on
+  most servers, plus an output plugin (`wal2json`, preinstalled on most
+  managed platforms, or `test_decoding`, built into PostgreSQL).
+- **You are stuck at the stock `wal_level = replica`** → use `RawFeed`.
+  No server change at all: it decodes physical WAL client-side. The
+  trade: no `TRUNCATE` detection, and the server streams the whole
+  cluster's WAL for pgnudge to filter locally.
+
+If you get to choose, choose `WalFeed`. `RawFeed` exists for when
+`logical` is off the table: managed defaults, no restart window,
+change-averse ops. Neither is more "correct"; they are the same contract
+over two different server capabilities. The
+[transport comparison](#two-transports-one-contract) below has the full
+trade-off.
+
+Either way you also need a role with the `REPLICATION` attribute and a
+direct connection (replication traffic cannot go through a pooler like
+PgBouncer). Then:
+
+1. `pip install pgnudge`
+2. point a feed at the database (the tour below)
+3. handle the two items: `Resync` → reload everything, `Batch` → reload
+   the named tables
+
+That is the whole setup. Nothing is installed in the database and nothing
+is left behind when the connection closes.
+
 ## Sixty-second tour
 
 ```python
