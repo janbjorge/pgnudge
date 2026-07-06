@@ -18,7 +18,7 @@ import ssl as ssl_module
 import time
 from typing import ClassVar
 
-from pgnudge.engine import BaseFeed
+from pgnudge.engine import BaseFeed, trace_frame
 from pgnudge.proto import StatusFeedback, WalsenderConnection, XLogData
 
 __all__ = ["WalFeed"]
@@ -191,7 +191,9 @@ class WalFeed(BaseFeed):
                     self.last_inbound = time.monotonic()
                     if isinstance(msg, XLogData):
                         self._last_lsn = max(self._last_lsn, msg.end_lsn)
-                        for table in parse(msg.payload):
+                        names = parse(msg.payload)
+                        trace_frame(self.log, msg, "-> %s", names)
+                        for table in names:
                             self._push_raw(table)
                     else:  # Keepalive; read_stream returns nothing else
                         self._last_lsn = max(self._last_lsn, msg.end_lsn)

@@ -23,6 +23,9 @@ classifiers = [
   "Topic :: Database",
 ]
 
+[project.scripts]
+pgnudge = "pgnudge.__main__:main"
+
 [project.urls]
 Homepage = "https://github.com/janbjorge/pgnudge"
 

@@ -1,0 +1,151 @@
+"""pgnudge CLI: open a feed and watch the parsed replication stream.
+
+The default output is the product itself: one line per ``Batch`` or
+``Resync``. Raise the verbosity to study the layers underneath.
+
+Verbosity ladder (repeat ``-v``):
+
+    (none)  WARNING  only the product: each Batch / Resync
+    -v      INFO     + connection lifecycle (streaming, reconnect)
+    -vv     DEBUG    + each committed schema.table, txn eviction
+    -vvv    TRACE    + every wire frame and decoded record
+
+Connection settings fall back to the libpq ``PG*`` environment variables
+(PGHOST, PGPORT, PGUSER, PGDATABASE, PGPASSWORD); explicit flags win.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import logging
+import os
+
+from pgnudge import Batch, RawFeed, Resync, WalFeed, __version__
+from pgnudge.engine import TRACE, BaseFeed
+
+_LEVELS = (logging.WARNING, logging.INFO, logging.DEBUG, TRACE)
+
+
+def _verbosity_level(count: int) -> int:
+    return _LEVELS[min(count, len(_LEVELS) - 1)]
+
+
+def _env_int(name: str, fallback: int) -> int:
+    value = os.environ.get(name)
+    return int(value) if value else fallback
+
+
+def build_parser() -> argparse.ArgumentParser:
+    common = argparse.ArgumentParser(add_help=False)
+    conn = common.add_argument_group("connection")
+    conn.add_argument("--host", default=os.environ.get("PGHOST", "127.0.0.1"))
+    conn.add_argument("--port", type=int, default=_env_int("PGPORT", 5432))
+    conn.add_argument("--user", default=os.environ.get("PGUSER"))
+    conn.add_argument("--database", default=os.environ.get("PGDATABASE"))
+    conn.add_argument("--password", default=os.environ.get("PGPASSWORD"))
+    conn.add_argument("--ssl", action="store_true", help="require TLS")
+    common.add_argument(
+        "--table",
+        action="append",
+        metavar="SCHEMA.TABLE",
+        help="only watch this table; repeatable",
+    )
+    knobs = common.add_argument_group("feed")
+    knobs.add_argument("--debounce", type=float, default=0.05, help="quiet window before a batch closes (s)")
+    knobs.add_argument("--status-interval", type=float, default=10.0, dest="status_interval")
+    knobs.add_argument("--failsafe", type=float, default=None, help="emit a periodic resync every N seconds")
+    common.add_argument(
+        "-v",
+        "--verbose",
+        action="count",
+        default=0,
+        help="repeat for more: -v lifecycle, -vv names, -vvv frames+records",
+    )
+
+    parser = argparse.ArgumentParser(
+        prog="pgnudge",
+        description="Watch the parsed pgnudge replication stream.",
+    )
+    parser.add_argument("--version", action="version", version=f"pgnudge {__version__}")
+    sub = parser.add_subparsers(dest="command", metavar="{wal,raw}")
+    wal = sub.add_parser(
+        "wal",
+        parents=[common],
+        help="logical decoding via a temporary slot (needs wal_level=logical)",
+    )
+    wal.add_argument("--plugin", choices=("wal2json", "test_decoding"), default="wal2json")
+    sub.add_parser(
+        "raw",
+        parents=[common],
+        help="slot-less physical WAL, decoded client-side (works at wal_level=replica)",
+    )
+    return parser
+
+
+def _build_feed(args: argparse.Namespace) -> WalFeed | RawFeed:
+    if args.command == "wal":
+        return WalFeed(
+            host=args.host,
+            port=args.port,
+            user=args.user,
+            database=args.database,
+            password=args.password,
+            ssl=args.ssl,
+            tables=args.table,
+            plugin=args.plugin,
+            status_interval=args.status_interval,
+            debounce=args.debounce,
+            failsafe=args.failsafe,
+        )
+    return RawFeed(
+        host=args.host,
+        port=args.port,
+        user=args.user,
+        database=args.database,
+        password=args.password,
+        ssl=args.ssl,
+        tables=args.table,
+        status_interval=args.status_interval,
+        debounce=args.debounce,
+        failsafe=args.failsafe,
+    )
+
+
+def _format_batch(batch: Batch) -> str:
+    parts = [f"{e.payload} (x{e.count})" if e.count > 1 else e.payload for e in batch.events]
+    return "batch: " + ", ".join(parts)
+
+
+async def _watch(feed: BaseFeed) -> None:
+    async with feed:
+        async for item in feed:
+            match item:
+                case Resync(reason=reason):
+                    print(f"resync: {reason}", flush=True)
+                case Batch():
+                    print(_format_batch(item), flush=True)
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.command is None:
+        parser.error("a transport is required: wal or raw")
+    if not args.user:
+        parser.error("--user is required (or set PGUSER)")
+    if not args.database:
+        parser.error("--database is required (or set PGDATABASE)")
+
+    # Install a handler at root but raise only the pgnudge logger; other
+    # libraries (asyncio, etc.) stay at WARNING so -vvv isn't drowned out.
+    logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    logging.getLogger("pgnudge").setLevel(_verbosity_level(args.verbose))
+    try:
+        asyncio.run(_watch(_build_feed(args)))
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    main()

@@ -7,16 +7,42 @@ that ``BaseFeed`` exposes.
 """
 
 import asyncio
+import logging
 import random
 import time
 from collections.abc import AsyncIterator, Callable, Coroutine
 from dataclasses import dataclass, field
 from types import TracebackType
-from typing import Self
+from typing import ClassVar, Self
 
 from pgnudge.core import Batch, Event, FeedItem, Resync
+from pgnudge.proto import XLogData, format_lsn, payload_preview
 
-__all__ = ["Wakeup", "Intake", "Coalescer", "Debouncer", "Backoff", "FeedService", "BaseFeed"]
+__all__ = ["TRACE", "trace_frame", "Wakeup", "Intake", "Coalescer", "Debouncer", "Backoff", "FeedService", "BaseFeed"]
+
+# One step below DEBUG: the per-frame / per-record firehose the CLI turns on
+# at -vvv. Off by default, so the guarded taps that emit at this level cost
+# nothing in normal use.
+TRACE = 5
+logging.addLevelName(TRACE, "TRACE")
+
+
+def trace_frame(log: logging.Logger, msg: XLogData, tail: str, *args: object) -> None:
+    """TRACE-log one wire frame: shared prefix, transport-specific ``tail``.
+
+    Guarded so the LSN/preview formatting never runs when TRACE is off.
+    """
+    if not log.isEnabledFor(TRACE):
+        return
+    log.log(
+        TRACE,
+        "XLogData %s..%s len=%d %r " + tail,
+        format_lsn(msg.start_lsn),
+        format_lsn(msg.end_lsn),
+        len(msg.payload),
+        payload_preview(msg.payload),
+        *args,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +235,10 @@ class BaseFeed:
     (re)connect, ``_push_raw`` per wakeup) and may override ``_extra_close``.
     """
 
+    # Subclasses override with their transport logger (pgnudge.wal / .raw);
+    # the base default keeps ``_push_raw`` logging valid on its own.
+    log: ClassVar[logging.Logger] = logging.getLogger("pgnudge")
+
     def __init__(
         self,
         *,
@@ -275,6 +305,9 @@ class BaseFeed:
         return self._service.closing
 
     def _push_raw(self, payload: str) -> None:
+        # The convergence point for both transports: every committed
+        # schema.table passes here. -vv (DEBUG) surfaces the named change.
+        self.log.debug("nudge %s", payload)
         self._service.push(payload)
 
     def _emit_resync(self, reason: str) -> None:

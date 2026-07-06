@@ -26,6 +26,7 @@ __all__ = [
     "WalsenderConnection",
     "format_lsn",
     "parse_lsn",
+    "payload_preview",
 ]
 
 
@@ -38,6 +39,12 @@ def parse_lsn(text: str) -> int:
 def format_lsn(lsn: int) -> str:
     """Integer WAL position to ``X/Y`` hex notation."""
     return f"{lsn >> 32:X}/{lsn & 0xFFFFFFFF:X}"
+
+
+def payload_preview(payload: bytes, limit: int = 48) -> str:
+    """A short, printable digest of a wire payload for TRACE logging."""
+    head = payload[:limit].decode("utf-8", "backslashreplace")
+    return head + "..." if len(payload) > limit else head
 
 
 class PgServerError(Exception):

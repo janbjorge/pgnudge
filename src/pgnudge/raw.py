@@ -17,7 +17,7 @@ import time
 from dataclasses import dataclass, field
 from typing import ClassVar
 
-from pgnudge.engine import BaseFeed
+from pgnudge.engine import BaseFeed, trace_frame
 from pgnudge.proto import StatusFeedback, WalsenderConnection, XLogData, format_lsn, parse_lsn
 from pgnudge.xlog import CommitGate, RelChange, WalSyncError, XLogWalker
 
@@ -219,7 +219,9 @@ class RawFeed(BaseFeed):
                                 f"stream position {format_lsn(msg.start_lsn)}"
                                 f" does not follow {format_lsn(expected)}"
                             )
-                        released = gate.push(walker.feed(msg.payload))
+                        events = walker.feed(msg.payload)
+                        released = gate.push(events)
+                        trace_frame(self.log, msg, "events=%s released=%s", events, released)
                         if released:
                             await self.push_committed(released, resolver)
                     elif msg.reply_requested:
