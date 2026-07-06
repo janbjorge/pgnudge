@@ -179,6 +179,10 @@ docs/
                mechanics in PostgreSQL's own terms, the gap-free handshake,
                polling vs pgnudge, when NOT to use pgnudge, operational
                limits.
+  parsing.md   reference: the parsing layers structure by structure. Wire
+               frames (proto), wal2json/test_decoding payloads, physical
+               WAL byte layouts (page/record headers, block refs, xact),
+               and the engine convergence to schema.table strings.
 examples/
   minimal.py   smallest end-to-end consumer: WalFeed + match on Resync/Batch.
 .github/workflows/

@@ -4,7 +4,8 @@ pgnudge turns PostgreSQL's write-ahead log into wakeups. The mechanism is
 logical decoding over the streaming-replication protocol; the primitive that
 makes it zero-footprint is the **temporary replication slot**. This page lays
 out the machinery in PostgreSQL's own terms, the guarantees that fall out of
-it, and the cases where you should use something else.
+it, and the cases where you should use something else. The parsing layers,
+frame by frame, are in [parsing.md](parsing.md).
 
 ## The WAL is already a change feed
 

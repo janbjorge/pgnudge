@@ -3,7 +3,8 @@
 How `RawFeed` turns a raw physical replication stream into
 `schema.table` nudges with zero server footprint, and where the edges
 are. Companion to [temporary-slots.md](temporary-slots.md), which covers
-the logical transport.
+the logical transport; byte layouts and parser structures are in
+[parsing.md](parsing.md).
 
 ## Why this transport exists
 
