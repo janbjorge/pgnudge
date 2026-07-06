@@ -29,7 +29,7 @@ from pgnudge import Batch, Resync, WalFeed
 async with WalFeed(
     host="db.example.com", user="wal_user", password=...,
     database="app", ssl=True,
-    tables=["public.orders", "public.stations"],   # server-side filter
+    tables=["public.orders", "public.stations"],   # filtered in the output plugin
     debounce=0.05,
 ) as feed:
     async for item in feed:
@@ -116,7 +116,9 @@ next write to the table nudges normally). `RawFeed` also opens a second,
 plain connection for catalog lookups (relfilenode to table name), and
 `pg_hba.conf` needs a `replication` entry for the role, because physical
 replication matches the `replication` pseudo-database, not `all`.
-Mechanics in [docs/physical-wal.md](docs/physical-wal.md).
+Mechanics in [docs/physical-wal.md](docs/physical-wal.md); the byte
+layouts and parser structures behind both transports are in
+[docs/parsing.md](docs/parsing.md).
 
 ## The contract
 

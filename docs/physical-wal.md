@@ -94,7 +94,10 @@ write misses the cache and resolves fresh. A relfilenode that does not
 resolve (a table created and written in a not-yet-visible transaction)
 is dropped uncached and retries on its next appearance. System schemas
 (`pg_catalog`, `pg_toast`, `information_schema`) resolve to a cached
-drop, so catalog and TOAST churn never nudges.
+drop, so catalog and TOAST churn never nudges. Other databases never
+reach the resolver at all: the stream carries the whole cluster's WAL,
+but any change whose database oid is not the connected database's is
+dropped at commit time, before name resolution.
 
 ## The gaps, stated plainly
 
@@ -109,6 +112,10 @@ drop, so catalog and TOAST churn never nudges.
 - **pg_hba.conf.** Physical replication connections match the
   `replication` pseudo-database, so `host all` rules do not admit them.
   One `host replication <role> ...` line is required.
+- **Privileges.** `START_REPLICATION PHYSICAL` needs a role with the
+  `REPLICATION` attribute, same as the logical transport. The catalog
+  connection reads `pg_class` and `pg_namespace`, which any role can by
+  default; only a locked-down catalog needs an extra grant.
 - **Unlogged and temporary tables** write no WAL and therefore never
   nudge, on either transport.
 

@@ -94,7 +94,8 @@ lives in its first 4 bytes (`<I`, plausible range 24 bytes to 1 GiB),
 which may themselves straddle a page boundary. Two skips make
 arbitrary entry and segment switches work: the first page's
 `xlp_rem_len` crosses a record already in flight at the start position
-(which is why any `page_floor`-aligned LSN is a valid entry point),
+(which is why any LSN rounded down to its 8KB page boundary is a valid
+entry point),
 and an `XLOG_SWITCH` record zero-fills the rest of its segment with no
 page headers at all, crossed by a raw byte count. Completed records
 whose end position is at or before `emit_from` (the from-connect

@@ -109,6 +109,13 @@ degrades in the same direction: if the consumer falls behind and the intake
 buffer overflows, pgnudge drops the buffered hints and emits
 `Resync("overflow")`. Coarser, never wrong.
 
+The fourth `Resync` reason is opt-in: pass `failsafe=<seconds>` (both
+feeds accept it, off by default) and the feed emits `Resync("failsafe")`
+on that interval, unconditionally, whether or not anything arrived. It is
+a belt-and-braces bound on staleness: a wakeup lost to a failure mode
+nobody has found yet costs at most one interval, because the periodic
+refetch reconciles everything regardless.
+
 ## Polling vs. pgnudge
 
 The pattern pgnudge replaces: ask on a timer, whether or not anything
