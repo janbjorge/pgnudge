@@ -9,13 +9,16 @@ the logical transport; byte layouts and parser structures are in
 ## Why this transport exists
 
 Logical decoding requires `wal_level=logical`, a cluster-wide setting
-that usually needs a restart, and on managed platforms sometimes a
-change request too. Physical replication works at `wal_level=replica`,
-the stock default of every PostgreSQL since 9.6. `START_REPLICATION
+that needs a restart ("can only be set at server start"[^1]), and on
+managed platforms sometimes a change request too. Physical replication
+works at `wal_level=replica`, the stock default since PostgreSQL 10
+(the value itself dates to 9.6, when `archive` and `hot_standby`
+merged; 10 flipped the default from `minimal`[^2]). `START_REPLICATION
 PHYSICAL` also works **without a slot**: the client asks for a start
 position and the server streams bytes. Nothing is created server-side
 at any point, which is stronger than the logical transport's temporary
-slot (an object, if a self-destructing one).
+slot (an object, if a self-destructing one). The protocol grammar makes
+the `SLOT` clause optional for physical streaming.[^3]
 
 The trade is that physical WAL is a byte stream of internal record
 structures, not decoded rows, and it covers the whole cluster. pgnudge
@@ -49,16 +52,17 @@ by resource manager and operation before any further work.
 
 ## Start position: no fast-forward, no history
 
-`IDENTIFY_SYSTEM` returns the server's current position and timeline.
-The feed:
+`IDENTIFY_SYSTEM` returns the server's current flush position and
+timeline.[^3] The feed:
 
 1. queries `pg_current_wal_insert_lsn()` as the from-connect watermark
-   (with asynchronous commit, flushed < inserted, and pre-connect
-   writes may still be in WAL buffers; the insert position is the same
-   point a logical slot would reserve);
-2. starts streaming from the enclosing 8KB page boundary, because
-   record framing is only recoverable at page starts (the page header's
-   `xlp_rem_len` says how much of an in-flight record to skip);
+   (the insert position is the "logical end of WAL"[^8]: with
+   asynchronous commit, flushed < inserted, and pre-connect writes may
+   still be in WAL buffers);
+2. starts streaming from the 8KB page boundary enclosing the reported
+   flush position, because record framing is only recoverable at page
+   starts (the page header's `xlp_rem_len` says how much of an
+   in-flight record to skip);
 3. suppresses events from records that end at or before the watermark.
 
 Slot-less means the server retains nothing for a disconnected feed.
@@ -101,23 +105,28 @@ dropped at commit time, before name resolution.
 
 ## The gaps, stated plainly
 
-- **TRUNCATE does not nudge.** At `wal_level=replica` the WAL carries
-  no reliable TRUNCATE signature (the record type it uses is shared
-  with vacuum tail-truncation). The next write to the table nudges
+- **TRUNCATE does not nudge.** The only record that unambiguously
+  means TRUNCATE (`XLOG_HEAP_TRUNCATE`) is written at
+  `wal_level=logical` only.[^4] At `replica`, TRUNCATE swaps in a new
+  relfilenode, so on the wire it looks like any other rewrite
+  (`VACUUM FULL`, `CLUSTER`). The next write to the table nudges
   normally. Use `WalFeed` if TRUNCATE visibility matters.
 - **Cluster-wide bandwidth.** The server streams all databases' WAL,
   plus index and maintenance traffic; filtering happens client-side.
   On a write-heavy cluster this is real network cost. Measure before
   running many `RawFeed`s; prefer the bridge daemon shape.
 - **pg_hba.conf.** Physical replication connections match the
-  `replication` pseudo-database, so `host all` rules do not admit them.
-  One `host replication <role> ...` line is required.
+  `replication` keyword in the database column and specify no
+  particular database,[^5] so `host all` rules do not admit them. One
+  `host replication <role> ...` line is required.
 - **Privileges.** `START_REPLICATION PHYSICAL` needs a role with the
-  `REPLICATION` attribute, same as the logical transport. The catalog
+  `REPLICATION` attribute,[^6] same as the logical transport. The catalog
   connection reads `pg_class` and `pg_namespace`, which any role can by
   default; only a locked-down catalog needs an extra grant.
-- **Unlogged and temporary tables** write no WAL and therefore never
-  nudge, on either transport.
+- **Unlogged and temporary tables**: their contents are not written to
+  WAL,[^7] so their rows never nudge, on either transport. (Creating or
+  dropping one still writes catalog WAL; system schemas are dropped by
+  the resolver anyway.)
 
 ## Tested how
 
@@ -129,3 +138,34 @@ including an untouched `wal_level=replica` container. The decoder
 itself answers to an oracle: a live mixed workload's WAL range is
 decoded by our walker and by `pg_waldump`, and the two change sequences
 must match exactly, on every PostgreSQL major in CI.
+
+## Sources
+
+[^1]: PostgreSQL, [Write-Ahead Log settings](https://www.postgresql.org/docs/current/runtime-config-wal.html):
+    `wal_level` values, default `replica`, "can only be set at server
+    start".
+[^2]: PostgreSQL [9.6](https://www.postgresql.org/docs/release/9.6.0/)
+    and [10](https://www.postgresql.org/docs/release/10.0/) release
+    notes: 9.6 merged `archive`/`hot_standby` into `replica`; 10
+    changed the defaults for `wal_level`, `max_wal_senders`,
+    `max_replication_slots`.
+[^3]: PostgreSQL, [Streaming Replication Protocol](https://www.postgresql.org/docs/current/protocol-replication.html):
+    `IDENTIFY_SYSTEM` (`xlogpos` is the flush location),
+    `START_REPLICATION [ SLOT slot_name ] [ PHYSICAL ]`.
+[^4]: PostgreSQL source, [`tablecmds.c`](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/commands/tablecmds.c)
+    (`ExecuteTruncateGuts`): `RelationSetNewRelfilenumber` on TRUNCATE;
+    `XLOG_HEAP_TRUNCATE` emitted only under `XLogLogicalInfoActive()`.
+    Vacuum tail-truncation is the separate `XLOG_SMGR_TRUNCATE` in
+    [`storage.c`](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/catalog/storage.c).
+[^5]: PostgreSQL, [The pg_hba.conf File](https://www.postgresql.org/docs/current/auth-pg-hba-conf.html):
+    the `replication` keyword matches physical replication connections,
+    which "do not specify any particular database".
+[^6]: PostgreSQL, [Role Attributes](https://www.postgresql.org/docs/current/role-attributes.html):
+    initiating streaming replication requires `REPLICATION` (and
+    `LOGIN`), superusers excepted.
+[^7]: PostgreSQL, [CREATE TABLE](https://www.postgresql.org/docs/current/sql-createtable.html):
+    "Data written to unlogged tables is not written to the write-ahead
+    log". Temporary-table contents likewise skip WAL (an optimization
+    noted in the [8.3 release notes](https://www.postgresql.org/docs/current/release-8-3.html)).
+[^8]: PostgreSQL, [System Administration Functions](https://www.postgresql.org/docs/current/functions-admin.html):
+    `pg_current_wal_insert_lsn`, insert vs write vs flush locations.

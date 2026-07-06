@@ -141,7 +141,11 @@ relation, otherwise `<III` gives the `RelFileLocator` (tablespace oid,
 database oid, relnumber), followed by a 4-byte block number. The first
 main-fork reference (`fork_flags & 0x0F == 0`) names the changed
 relation. The walk ends when the remaining bytes equal the declared
-data total; any mismatch is a `WalSyncError`, never a guess.
+data total; any mismatch is a `WalSyncError`, never a guess. One
+narrowing against the spec: PostgreSQL numbers block references 0
+through 32 (`XLR_MAX_BLOCK_ID`), the walker accepts 0 through 31 and
+calls 32 a desync; none of the record types it walks carries more than
+a few references, so the bound is unreachable in practice.
 
 ### Transaction records
 
@@ -199,12 +203,27 @@ are indistinguishable.
 ## Sources
 
 - PostgreSQL, [Streaming Replication Protocol](https://www.postgresql.org/docs/current/protocol-replication.html):
-  XLogData, Primary keepalive, Standby status update layouts.
-- PostgreSQL source: `access/xlogrecord.h` (record header, block
-  references), `access/xlog_internal.h` (page headers, segment
-  layout), `access/heapam_xlog.h` (heap opcodes), `access/xact.h`
-  (xinfo flags, subxid sections).
-- [wal2json](https://github.com/eulerto/wal2json): format version 2.
+  XLogData, Primary keepalive, Standby status update layouts;
+  timestamps are microseconds since midnight 2000-01-01.
+- PostgreSQL source (links pinned to REL_18_STABLE; layouts unchanged
+  since the 9.5 [record-format revamp](https://github.com/postgres/postgres/commit/2c03216d831160bedd72d45f712601b6f7d03f1c)):
+  [`access/xlogrecord.h`](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/include/access/xlogrecord.h)
+  (record header, block references, image and compression headers),
+  [`access/xlog_internal.h`](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/include/access/xlog_internal.h)
+  (page headers, magics, segment layout),
+  [`access/rmgrlist.h`](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/include/access/rmgrlist.h)
+  (resource-manager ids),
+  [`access/heapam_xlog.h`](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/include/access/heapam_xlog.h)
+  (heap opcodes),
+  [`access/xact.h`](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/include/access/xact.h)
+  (xinfo flags, subxid sections),
+  [`catalog/pg_control.h`](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/include/catalog/pg_control.h)
+  (`XLOG_SWITCH`).
+- [wal2json](https://github.com/eulerto/wal2json): format version 2,
+  `include-transaction`. PostgreSQL,
+  [test_decoding](https://www.postgresql.org/docs/current/test-decoding.html):
+  output format; the `", "` join for multi-table TRUNCATE is
+  [`pg_decode_truncate`](https://github.com/postgres/postgres/blob/REL_18_STABLE/contrib/test_decoding/test_decoding.c).
 - The struct offsets above are verified live: the oracle test decodes
   a real WAL range with both this walker and `pg_waldump`, and the two
   must match exactly, on every PostgreSQL major in CI.

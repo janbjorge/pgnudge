@@ -72,12 +72,14 @@ d/k        keepalive                       -> standby-status reply
 
 Two details carry weight:
 
-- **`SNAPSHOT 'nothing'`** skips snapshot export: the slot decodes strictly
-  forward from its creation point.[^3] Pre-connect history is unreachable by
-  mechanism, not by policy.
-- **Slot creation waits** for write transactions in flight at connect time to
-  finish. A long-running write delays connect; it never causes old changes
-  to be delivered.
+- **`SNAPSHOT 'nothing'`** declines the slot's creation snapshot: it is
+  neither exported nor handed to the session,[^3] so the slot decodes
+  strictly forward from its creation point. Pre-connect history is
+  unreachable by mechanism, not by policy.
+- **Slot creation waits**: a logical slot "requires information about
+  all the currently running transactions"[^1] before it reaches its
+  consistent point, so writes in flight at connect time delay connect.
+  They never cause old changes to be delivered.
 
 ## Why the handshake is gap-free
 
@@ -177,14 +179,16 @@ requirement, take the other side of the trade:
   [pgqueuer](https://github.com/janbjorge/pgqueuer). pgnudge is its
   broadcast-shaped sibling, and broadcast has no delivery ledger.
 - **Many consumers, directly attached.** Each feed holds one walsender + one
-  slot against `max_wal_senders` / `max_replication_slots`, and each decodes
-  the *whole database's* WAL (table filtering happens post-decode, in the
-  plugin). Tens of direct feeds on a busy database multiply decode CPU. Run
-  one feed in a bridge daemon and fan out over `NOTIFY` instead.
+  slot against `max_wal_senders` / `max_replication_slots`,[^7] and each
+  decodes the *whole database's* WAL[^1] (table filtering happens
+  post-decode, via plugin options like wal2json's `add-tables`). Tens
+  of direct feeds on a busy database multiply decode CPU. Run one feed
+  in a bridge daemon and fan out over `NOTIFY` instead.
 - **You can't get the server config.** Logical decoding needs
-  `wal_level = logical` (restart), a role with `REPLICATION`, and a direct
-  connection, since replication traffic bypasses connection poolers such as
-  PgBouncer. If any of those are off the table, so is pgnudge.
+  `wal_level = logical` (restart[^4]), a role with `REPLICATION`[^5],
+  and a direct connection: replication traffic cannot be pooled
+  (PgBouncer at best forwards it unpooled, since 1.23[^6]). If any of
+  those are off the table, so is pgnudge.
 - **Sub-debounce latency or strict ordering.** Wakeups are debounced,
   coalesced hints in arrival order, not an ordered event log. If consumers
   must observe individual changes in commit order, decode the stream
@@ -195,17 +199,31 @@ requirement, take the other side of the trade:
 - One connected feed = one slot + one WAL sender. Disconnected = zero of
   everything, including retained WAL.
 - `status_interval` (default 10 s) must stay under the server's
-  `wal_sender_timeout` (default 60 s) or the server will kill the session as
-  unresponsive.
+  `wal_sender_timeout` (default 60 s[^7]) or the server will kill the
+  session as unresponsive.
 - Grant `REPLICATION` to a dedicated role: logical decoding sees every
   table in the database, regardless of any `tables` filter.
 
 ## Sources
 
 [^1]: PostgreSQL, [Logical Decoding Concepts](https://www.postgresql.org/docs/current/logicaldecoding-explanation.html):
-    decoding model, output plugins, commit-order delivery.
-[^2]: PostgreSQL, [Replication Slots](https://www.postgresql.org/docs/current/warm-standby.html#STREAMING-REPLICATION-SLOTS):
+    decoding model, output plugins, commit-order delivery, "each slot
+    streams a sequence of changes from a single database", and slot
+    creation requiring "information about all the currently running
+    transactions".
+[^2]: PostgreSQL, [Logical Decoding Concepts, Replication Slots](https://www.postgresql.org/docs/current/logicaldecoding-explanation.html#LOGICALDECODING-REPLICATION-SLOTS):
     slot persistence, resource pinning, the drop-it-yourself duty.
 [^3]: PostgreSQL, [Streaming Replication Protocol](https://www.postgresql.org/docs/current/protocol-replication.html):
     `CREATE_REPLICATION_SLOT` (`TEMPORARY`, `SNAPSHOT 'nothing'`),
     `START_REPLICATION`, CopyBoth message flow, standby status updates.
+[^4]: PostgreSQL, [Write-Ahead Log settings](https://www.postgresql.org/docs/current/runtime-config-wal.html):
+    `wal_level` "can only be set at server start"; default `replica`.
+[^5]: PostgreSQL, [Role Attributes](https://www.postgresql.org/docs/current/role-attributes.html):
+    initiating streaming replication requires `REPLICATION` and `LOGIN`.
+[^6]: PgBouncer 1.23 added pass-through proxying of replication
+    connections ([pgbouncer#876](https://github.com/pgbouncer/pgbouncer/pull/876));
+    they bind one server connection for the session's lifetime and are
+    never transaction-pooled.
+[^7]: PostgreSQL, [Replication settings](https://www.postgresql.org/docs/current/runtime-config-replication.html):
+    `wal_sender_timeout` default 60 s; also `max_wal_senders` and
+    `max_replication_slots`, both default 10.
