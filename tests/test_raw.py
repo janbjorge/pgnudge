@@ -209,8 +209,8 @@ async def capture_changes(pg: PgParams, start: int, end: int) -> list[tuple[int,
     return [(c.db_oid, c.relfilenode, c.kind) for c in changes]
 
 
-def waldump_changes(container: PostgresContainer, start: int, end: int, db_oid: int) -> list[tuple[int, str]]:
-    """The same WAL range through PostgreSQL's own decoder."""
+def waldump_once(container: PostgresContainer, start: int, end: int, db_oid: int) -> list[tuple[int, str]]:
+    """One pass of the WAL range through PostgreSQL's own decoder."""
     kinds = {
         ("Heap", "INSERT"): "insert",
         ("Heap", "DELETE"): "delete",
@@ -233,6 +233,25 @@ def waldump_changes(container: PostgresContainer, start: int, end: int, db_oid: 
             if kind:
                 out.append((int(m.group(4)), kind))
     return out
+
+
+def waldump_changes(container: PostgresContainer, start: int, end: int, db_oid: int) -> list[tuple[int, str]]:
+    """The same WAL range through PostgreSQL's own decoder, read until stable.
+
+    pg_waldump reads the live on-disk WAL segment, whose newest pages are
+    still settling right after the workload commits (fsync is off in the test
+    container), so any single read can drop a record (empirically ~45% of
+    reads are short by one). Over this fixed, valid range it only ever
+    under-reports, never invents, so the complete dump is the longest one and
+    its content is unique: read repeatedly and keep the longest. With 25
+    independent reads the chance every one is short is ~0.45**25, negligible.
+    """
+    best: list[tuple[int, str]] = []
+    for _ in range(25):
+        cur = waldump_once(container, start, end, db_oid)
+        if len(cur) > len(best):
+            best = cur
+    return best
 
 
 async def test_decoder_matches_pg_waldump_oracle(
