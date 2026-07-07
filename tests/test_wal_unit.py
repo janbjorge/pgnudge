@@ -135,7 +135,7 @@ async def test_extra_close_aborts_and_clears_connection() -> None:
 
     def attach(feed: WalFeed, conn: WalsenderConnection) -> None:
         # in a helper so mypy's attribute narrowing doesn't outlive the call
-        feed._conn = conn
+        feed.conn = conn
         feed.slot_name = "pgnudge_x"
 
     async with scripted_server(handler) as (host, port):
@@ -143,7 +143,7 @@ async def test_extra_close_aborts_and_clears_connection() -> None:
         feed = wal_feed(port)
         attach(feed, conn)
         await feed._extra_close()
-        assert feed._conn is None
+        assert feed.conn is None
         assert feed.slot_name is None
 
 
@@ -168,7 +168,7 @@ class RecordingConn(WalsenderConnection):
 async def test_feedback_loop_sends_status_until_send_fails() -> None:
     conn = RecordingConn(fail_after=2)
     feed = wal_feed(5432, status_interval=0.01)
-    feed._last_lsn = 77
+    feed.last_lsn = 77
     await asyncio.wait_for(feed._feedback_loop(conn), 2.0)  # returns on send failure
     assert conn.sent == [(77, True), (77, True)]  # liveness on -> every status probes
     assert not conn.aborted

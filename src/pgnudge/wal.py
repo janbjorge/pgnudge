@@ -8,7 +8,6 @@ and an output plugin (wal2json or test_decoding).
 """
 
 import asyncio
-import contextlib
 import json
 import logging
 import os
@@ -18,9 +17,9 @@ import ssl as ssl_module
 import time
 from typing import ClassVar
 
-from pgnudge.engine import BaseFeed, trace_frame, validate_feed_params
+from pgnudge.engine import BaseFeed, trace_frame
 from pgnudge.errors import ConfigError
-from pgnudge.proto import StatusFeedback, WalsenderConnection, XLogData
+from pgnudge.proto import WalsenderConnection, XLogData
 
 __all__ = ["WalFeed"]
 
@@ -67,6 +66,10 @@ class WalFeed(BaseFeed):
         raw_queue_size: int = 8192,
     ) -> None:
         super().__init__(
+            status_interval=status_interval,
+            liveness_timeout=liveness_timeout,
+            connect_timeout=connect_timeout,
+            tables=tables,
             debounce=debounce,
             max_batch_wait=max_batch_wait,
             failsafe=failsafe,
@@ -75,23 +78,18 @@ class WalFeed(BaseFeed):
         )
         if plugin not in ("wal2json", "test_decoding"):
             raise ConfigError(f"unsupported plugin {plugin!r}")
-        validate_feed_params(status_interval=status_interval, liveness_timeout=liveness_timeout, tables=tables)
-        self._host = host
-        self._port = port
-        self._user = user
-        self._database = database
-        self._password = password
-        self._ssl = ssl
-        self._tables = list(tables) if tables is not None else None
-        self._plugin = plugin
-        self._application_name = application_name
-        self._status_interval = status_interval
-        self.liveness_timeout = liveness_timeout
-        self._connect_timeout = connect_timeout
+        self.host = host
+        self.port = port
+        self.user = user
+        self.database = database
+        self.password = password
+        self.ssl = ssl
+        self.tables = list(tables) if tables is not None else None
+        self.plugin = plugin
+        self.application_name = application_name
 
-        self._conn: WalsenderConnection | None = None
-        self._last_lsn = 0
-        self.last_inbound = time.monotonic()
+        self.conn: WalsenderConnection | None = None
+        self.last_lsn = 0
         self.slot_name: str | None = None
 
     # -- payload parsing ----------------------------------------------------------
@@ -119,18 +117,18 @@ class WalFeed(BaseFeed):
     async def _extra_close(self) -> None:
         # Hard-close on purpose, no DROP: crash and clean exit must exercise
         # the same server-side cleanup path.
-        if self._conn is not None:
-            self._conn.abort()
-            self._conn = None
+        if self.conn is not None:
+            self.conn.abort()
+            self.conn = None
         self.slot_name = None
 
     # -- replication command assembly --------------------------------------------
 
     def _plugin_options(self) -> str:
-        if self._plugin == "wal2json":
+        if self.plugin == "wal2json":
             opts = [('"format-version"', "2"), ('"include-transaction"', "false")]
-            if self._tables:
-                opts.append(('"add-tables"', ",".join(self._tables)))
+            if self.tables:
+                opts.append(('"add-tables"', ",".join(self.tables)))
             return ", ".join(f"{name} {_quote_value(value)}" for name, value in opts)
         return '"skip-empty-xacts" \'1\''
 
@@ -138,37 +136,34 @@ class WalFeed(BaseFeed):
 
     async def _supervisor(self) -> None:
         """Connect, create a fresh TEMPORARY slot, stream until error, back off, repeat."""
-        parse = self._parse_wal2json_v2 if self._plugin == "wal2json" else self._parse_test_decoding
+        parse = self._parse_wal2json_v2 if self.plugin == "wal2json" else self._parse_test_decoding
         attempt = 0
         first = True
         while not self._closing:
             try:
                 conn = await WalsenderConnection.connect(
-                    host=self._host,
-                    port=self._port,
-                    user=self._user,
-                    database=self._database,
-                    password=self._password,
-                    ssl=self._ssl,
-                    application_name=self._application_name,
-                    connect_timeout=self._connect_timeout,
+                    host=self.host,
+                    port=self.port,
+                    user=self.user,
+                    database=self.database,
+                    password=self.password,
+                    ssl=self.ssl,
+                    application_name=self.application_name,
+                    connect_timeout=self.connect_timeout,
                 )
             except Exception as exc:
-                self.log.warning("connect to %s:%d failed: %s", self._host, self._port, exc)
+                self.log.warning("connect to %s:%d failed: %s", self.host, self.port, exc)
                 attempt += 1
-                delay = self._backoff_delay(attempt)
-                self.log.debug("reconnect attempt %d in %.2fs", attempt, delay)
-                await asyncio.sleep(delay)
+                await self._reconnect_pause(attempt)
                 continue
 
-            self._conn = conn
+            self.conn = conn
             self.connection_pid = conn.backend_pid
             slot = f"pgnudge_{os.getpid()}_{secrets.token_hex(3)}"
-            feedback: asyncio.Task[None] | None = None
             try:
                 await conn.simple_query(
                     # SNAPSHOT 'nothing': from-connect-only, the Resync refetch is the backfill
-                    f'CREATE_REPLICATION_SLOT "{slot}" TEMPORARY LOGICAL {self._plugin} (SNAPSHOT \'nothing\')'
+                    f'CREATE_REPLICATION_SLOT "{slot}" TEMPORARY LOGICAL {self.plugin} (SNAPSHOT \'nothing\')'
                 )
                 await conn.start_replication(
                     f'START_REPLICATION SLOT "{slot}" LOGICAL 0/0 ({self._plugin_options()})'
@@ -179,49 +174,36 @@ class WalFeed(BaseFeed):
                 self.log.info("streaming from slot %s (backend pid %s)", slot, conn.backend_pid)
                 first = False
 
-                self._last_lsn = 0
+                self.last_lsn = 0
                 self.last_inbound = time.monotonic()
-                feedback = asyncio.create_task(self._feedback_loop(conn))
-                while True:
-                    msg = await conn.read_stream()
-                    self.last_inbound = time.monotonic()
-                    if isinstance(msg, XLogData):
-                        self._last_lsn = max(self._last_lsn, msg.end_lsn)
-                        names = parse(msg.payload)
-                        trace_frame(self.log, msg, "-> %s", names)
-                        for table in names:
-                            self._push_raw(table)
-                    else:  # Keepalive; read_stream returns nothing else
-                        self._last_lsn = max(self._last_lsn, msg.end_lsn)
-                        if msg.reply_requested:
-                            await conn.send_standby_status(self._last_lsn)
+                async with self._feedback_running(conn):
+                    while True:
+                        msg = await conn.read_stream()
+                        self.last_inbound = time.monotonic()
+                        if isinstance(msg, XLogData):
+                            self.last_lsn = max(self.last_lsn, msg.end_lsn)
+                            names = parse(msg.payload)
+                            trace_frame(self.log, msg, "-> %s", names)
+                            for table in names:
+                                self._push_raw(table)
+                        else:  # Keepalive; read_stream returns nothing else
+                            self.last_lsn = max(self.last_lsn, msg.end_lsn)
+                            if msg.reply_requested:
+                                await conn.send_standby_status(self.last_lsn)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 # fall through to reconnect with a fresh slot
                 self.log.warning("stream error on slot %s, reconnecting: %s", slot, exc)
             finally:
-                if feedback is not None:
-                    feedback.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await feedback
                 self.connection_pid = None
                 self.slot_name = None
-                self._conn = None
+                self.conn = None
                 conn.abort()
 
             if not self._closing:
                 attempt += 1
-                delay = self._backoff_delay(attempt)
-                self.log.debug("reconnect attempt %d in %.2fs", attempt, delay)
-                await asyncio.sleep(delay)
+                await self._reconnect_pause(attempt)
 
-    async def _feedback_loop(self, conn: WalsenderConnection) -> None:
-        await StatusFeedback(
-            conn=conn,
-            interval=self._status_interval,
-            liveness=self.liveness_timeout,
-            lsn=lambda: self._last_lsn,
-            idle=lambda: time.monotonic() - self.last_inbound,
-            log=self.log,
-        ).run()
+    def _current_lsn(self) -> int:
+        return self.last_lsn

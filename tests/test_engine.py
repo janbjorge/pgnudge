@@ -1,11 +1,13 @@
 """Unit tests for the engine classes: pure asyncio, no PostgreSQL."""
 
 import asyncio
+import logging
 
 import pytest
 
 from pgnudge.core import Batch, Resync
 from pgnudge.engine import (
+    TRACE,
     Backoff,
     BaseFeed,
     Coalescer,
@@ -13,12 +15,33 @@ from pgnudge.engine import (
     FeedService,
     Intake,
     Wakeup,
+    trace_frame,
     validate_feed_params,
 )
+from pgnudge.proto import XLogData
 
 
 def wakeup(payload: str, at: float = 1.0) -> Wakeup:
     return Wakeup(payload=payload, at=at)
+
+
+# -- trace_frame --------------------------------------------------------------
+
+
+def test_trace_frame_formats_the_frame_when_trace_is_enabled(caplog: pytest.LogCaptureFixture) -> None:
+    log = logging.getLogger("pgnudge.test-trace")
+    msg = XLogData(start_lsn=0x1_0000_0000, end_lsn=0x1_0000_0010, payload=b"public.orders")
+    with caplog.at_level(TRACE, logger=log.name):
+        trace_frame(log, msg, "-> %s", ["public.orders"])
+    assert any("XLogData 1/0..1/10" in r.message and "public.orders" in r.message for r in caplog.records)
+
+
+def test_trace_frame_is_silent_when_trace_is_off(caplog: pytest.LogCaptureFixture) -> None:
+    log = logging.getLogger("pgnudge.test-trace-off")
+    msg = XLogData(start_lsn=0, end_lsn=0, payload=b"x")
+    with caplog.at_level(logging.DEBUG, logger=log.name):  # DEBUG is above TRACE
+        trace_frame(log, msg, "-> %s", [])
+    assert caplog.records == []
 
 
 # -- validate_feed_params -----------------------------------------------------

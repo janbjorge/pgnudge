@@ -27,3 +27,4 @@ htmlcov/
 
 # claude session artifacts — never commit
 .claude/
+docs/parsing-walkthrough.md

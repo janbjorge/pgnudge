@@ -7,6 +7,7 @@ that ``BaseFeed`` exposes.
 """
 
 import asyncio
+import contextlib
 import logging
 import random
 import time
@@ -17,7 +18,7 @@ from typing import ClassVar, Self
 
 from pgnudge.core import Batch, Event, FeedItem, Resync
 from pgnudge.errors import ConfigError
-from pgnudge.proto import XLogData, format_lsn, payload_preview
+from pgnudge.proto import StatusFeedback, WalsenderConnection, XLogData, format_lsn, payload_preview
 
 __all__ = ["TRACE", "trace_frame", "validate_feed_params", "Wakeup", "Intake", "Coalescer", "Debouncer", "Backoff", "FeedService", "BaseFeed"]
 
@@ -255,12 +256,17 @@ class BaseFeed:
     def __init__(
         self,
         *,
+        status_interval: float = 10.0,
+        liveness_timeout: float | None = 30.0,
+        connect_timeout: float = 10.0,
+        tables: list[str] | None = None,
         debounce: float = 0.05,
         max_batch_wait: float | None = None,
         failsafe: float | None = None,
         backoff: tuple[float, float] = (0.1, 5.0),
         raw_queue_size: int = 8192,
     ) -> None:
+        validate_feed_params(status_interval=status_interval, liveness_timeout=liveness_timeout, tables=tables)
         self._service = FeedService(
             intake=Intake(maxsize=raw_queue_size),
             debouncer=Debouncer(
@@ -271,6 +277,10 @@ class BaseFeed:
         )
         self._backoff = Backoff(initial=backoff[0], maximum=backoff[1])
         self.connection_pid: int | None = None  # server backend pid while connected
+        self.status_interval = status_interval
+        self.liveness_timeout = liveness_timeout
+        self.connect_timeout = connect_timeout
+        self.last_inbound = time.monotonic()  # updated by the transport on every frame
 
     # -- lifecycle --
 
@@ -328,6 +338,35 @@ class BaseFeed:
 
     def _backoff_delay(self, attempt: int) -> float:
         return self._backoff.delay(attempt)
+
+    async def _reconnect_pause(self, attempt: int) -> None:
+        delay = self._backoff_delay(attempt)
+        self.log.debug("reconnect attempt %d in %.2fs", attempt, delay)
+        await asyncio.sleep(delay)
+
+    async def _feedback_loop(self, conn: WalsenderConnection) -> None:
+        await StatusFeedback(
+            conn=conn,
+            interval=self.status_interval,
+            liveness=self.liveness_timeout,
+            lsn=self._current_lsn,
+            idle=lambda: time.monotonic() - self.last_inbound,
+            log=self.log,
+        ).run()
+
+    @contextlib.asynccontextmanager
+    async def _feedback_running(self, conn: WalsenderConnection) -> AsyncIterator[None]:
+        """Run the standby-status/liveness loop for the duration of the stream."""
+        task = asyncio.create_task(self._feedback_loop(conn))
+        try:
+            yield
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    def _current_lsn(self) -> int:  # pragma: no cover - abstract
+        raise NotImplementedError
 
     async def _supervisor(self) -> None:  # pragma: no cover - abstract
         raise NotImplementedError

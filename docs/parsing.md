@@ -129,7 +129,7 @@ without touching row contents. One byte of block id selects the form:
 | 254 DATA_LONG | main-data length, `<I` |
 | 253 ORIGIN | 2 bytes, skipped |
 | 252 TOPLEVEL_XID | 4 bytes, skipped |
-| 0–31 | one block reference (below) |
+| 0–32 | one block reference (below) |
 
 A block reference is fork_flags (1 byte) plus data length (`<H`). Flag
 0x10 (`BKPBLOCK_HAS_IMAGE`) appends a full-page-image header, `<HH`
@@ -141,11 +141,11 @@ relation, otherwise `<III` gives the `RelFileLocator` (tablespace oid,
 database oid, relnumber), followed by a 4-byte block number. The first
 main-fork reference (`fork_flags & 0x0F == 0`) names the changed
 relation. The walk ends when the remaining bytes equal the declared
-data total; any mismatch is a `WalSyncError`, never a guess. One
-narrowing against the spec: PostgreSQL numbers block references 0
-through 32 (`XLR_MAX_BLOCK_ID`), the walker accepts 0 through 31 and
-calls 32 a desync; none of the record types it walks carries more than
-a few references, so the bound is unreachable in practice.
+data total; any mismatch is a `WalSyncError`, never a guess. Block
+references are numbered 0 through 32 (`XLR_MAX_BLOCK_ID`); an id above
+that, below the 252–255 marker range, is a desync. None of the record
+types the walker cares about carries more than a few references, so the
+high end is never exercised in practice.
 
 ### Transaction records
 

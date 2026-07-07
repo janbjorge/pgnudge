@@ -336,6 +336,13 @@ def test_same_rel_second_block_reuses_locator() -> None:
     assert walk(s) == [RelChange(xid=6, db_oid=5, relfilenode=16384, kind="update")]
 
 
+def test_max_block_id_reference_is_accepted() -> None:
+    """XLR_MAX_BLOCK_ID (32) is the top valid block reference, not a special marker."""
+    s = WalStream(start_lsn())
+    s.add(record(rmid=10, info=0x00, blocks=block_ref(block_id=32, data_len=4), block_data=b"abcd"))
+    assert walk(s) == [RelChange(xid=100, db_oid=5, relfilenode=16384, kind="insert")]
+
+
 def test_non_main_fork_block_yields_nothing() -> None:
     s = WalStream(start_lsn())
     s.add(record(rmid=10, info=0x00, blocks=block_ref(fork=2, data_len=4), block_data=b"abcd"))
@@ -423,6 +430,14 @@ def test_continuation_flag_mismatch_raises() -> None:
 def test_invalid_block_reference_id_raises() -> None:
     s = WalStream(start_lsn())
     s.add(record(rmid=10, info=0x00, blocks=bytes([200]) + b"\x00" * 20))
+    with pytest.raises(WalSyncError, match="invalid block reference id"):
+        walk(s)
+
+
+def test_block_id_just_above_max_raises() -> None:
+    """One past XLR_MAX_BLOCK_ID (33) is neither a reference nor a marker."""
+    s = WalStream(start_lsn())
+    s.add(record(rmid=10, info=0x00, blocks=block_ref(block_id=33, data_len=4), block_data=b"abcd"))
     with pytest.raises(WalSyncError, match="invalid block reference id"):
         walk(s)
 
