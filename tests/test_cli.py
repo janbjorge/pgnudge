@@ -49,6 +49,15 @@ def test_port_is_int() -> None:
     assert args.port == 6432
 
 
+def test_ssl_defaults_from_pgsslmode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PGSSLMODE", "require")
+    assert build_parser().parse_args(["doctor"]).ssl is True
+    monkeypatch.setenv("PGSSLMODE", "prefer")
+    assert build_parser().parse_args(["doctor"]).ssl is False
+    monkeypatch.delenv("PGSSLMODE")
+    assert build_parser().parse_args(["doctor"]).ssl is False
+
+
 # -- verbosity ----------------------------------------------------------------
 
 

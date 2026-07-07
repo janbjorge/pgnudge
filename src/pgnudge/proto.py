@@ -1,13 +1,14 @@
 """Minimal walsender-mode protocol client, stdlib asyncio + scramp.
 
 Startup with ``replication=database`` (logical) or ``replication=true``
-(physical), optional TLS, trust/cleartext/SCRAM auth, simple query,
+(physical), optional TLS, trust/cleartext/MD5/SCRAM auth, simple query,
 CopyBoth streaming. See PostgreSQL docs: "Streaming Replication
 Protocol", "Message Formats".
 """
 
 import asyncio
 import contextlib
+import hashlib
 import logging
 import ssl as ssl_module
 import struct
@@ -189,8 +190,8 @@ class WalsenderConnection:
     ) -> None:
         """Send the startup packet and drive authentication to ReadyForQuery.
 
-        Speaks trust, cleartext (refused unless the connection is TLS), and
-        SCRAM-SHA-256; ``-PLUS`` mechanisms are filtered out because channel
+        Speaks trust, cleartext (refused unless the connection is TLS), MD5,
+        and SCRAM-SHA-256; ``-PLUS`` mechanisms are filtered out because channel
         binding is not implemented. After AuthenticationOk, drains
         ParameterStatus and BackendKeyData until ReadyForQuery.
         """
@@ -222,6 +223,14 @@ class WalsenderConnection:
                         raise PgServerError.from_message("server requested a password but none was given")
                     self._write_message(b"p", password.encode() + b"\x00")
                     await self._writer.drain()
+                elif code == 5:  # MD5Password
+                    if password is None or user is None:
+                        raise PgServerError.from_message("server requested a password but none was given")
+                    salt = msg.body[4:8]
+                    inner = hashlib.md5(password.encode() + user.encode()).hexdigest()  # noqa: S324
+                    token = "md5" + hashlib.md5(inner.encode() + salt).hexdigest()  # noqa: S324
+                    self._write_message(b"p", token.encode() + b"\x00")
+                    await self._writer.drain()
                 elif code == 10:  # SASL
                     mechanisms = [m.decode() for m in msg.body[4:].split(b"\x00") if m]
                     plain = [m for m in mechanisms if not m.endswith("-PLUS")]
@@ -242,7 +251,7 @@ class WalsenderConnection:
                         raise PgServerError.from_message("server sent SASLFinal before SASL")
                     scram.set_server_final(msg.body[4:].decode())
                 else:
-                    raise PgServerError.from_message(f"unsupported authentication request (code {code}); pgnudge speaks trust, cleartext and SCRAM-SHA-256")
+                    raise PgServerError.from_message(f"unsupported authentication request (code {code}); pgnudge speaks trust, cleartext, MD5 and SCRAM-SHA-256")
             elif msg.mtype == b"E":
                 raise PgServerError.from_wire(msg.body)
             else:  # NoticeResponse etc.

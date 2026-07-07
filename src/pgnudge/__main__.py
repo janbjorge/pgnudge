@@ -43,7 +43,12 @@ def build_parser() -> argparse.ArgumentParser:
     conn.add_argument("--user", default=os.environ.get("PGUSER"))
     conn.add_argument("--database", default=os.environ.get("PGDATABASE"))
     conn.add_argument("--password", default=os.environ.get("PGPASSWORD"))
-    conn.add_argument("--ssl", action="store_true", help="require TLS")
+    conn.add_argument(
+        "--ssl",
+        action="store_true",
+        default=os.environ.get("PGSSLMODE") in ("require", "verify-ca", "verify-full"),
+        help="require TLS (also honors PGSSLMODE=require/verify-ca/verify-full)",
+    )
     connection.add_argument(
         "-v",
         "--verbose",

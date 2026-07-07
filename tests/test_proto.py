@@ -178,6 +178,31 @@ async def test_cleartext_password_auth_sends_password_over_tls() -> None:
     assert got == [b"p" + b"hunter2\x00"]
 
 
+async def test_md5_password_auth_sends_hashed_token() -> None:
+    import hashlib
+
+    got: list[bytes] = []
+    salt = b"\x01\x02\x03\x04"
+
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await read_startup(reader)
+        writer.write(auth_request(5, salt))  # MD5Password
+        await writer.drain()
+        mtype, body = await read_frame(reader)
+        got.append(mtype + body)
+        writer.write(trust_handshake())
+        await writer.drain()
+        await reader.read()
+
+    async with scripted_server(handler) as (host, port):
+        conn = await connect(host, port, password="hunter2")
+        conn.abort()
+
+    inner = hashlib.md5(b"hunter2" + b"alice").hexdigest()
+    expected = ("md5" + hashlib.md5(inner.encode() + salt).hexdigest()).encode() + b"\x00"
+    assert got == [b"p" + expected]
+
+
 async def test_cleartext_request_without_password_raises() -> None:
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         await read_startup(reader)
@@ -195,7 +220,7 @@ async def test_cleartext_request_without_password_raises() -> None:
 @pytest.mark.parametrize(
     ("auth", "match"),
     [
-        pytest.param(auth_request(5, b"\x01\x02\x03\x04"), "code 5", id="md5-deliberately-absent"),
+        pytest.param(auth_request(2, b""), "code 2", id="kerberos-deliberately-absent"),
         pytest.param(auth_request(10, b"SCRAM-SHA-256-PLUS\x00\x00"), "unsupported SASL", id="only-plus-mechanisms"),
         pytest.param(auth_request(11, b"r=nope"), "SASLContinue before SASL", id="continue-with-no-exchange"),
         pytest.param(auth_request(12, b"v=nope"), "SASLFinal before SASL", id="final-with-no-exchange"),
