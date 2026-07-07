@@ -31,8 +31,19 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: uv sync
       # 100% line+branch locally; 98 leaves headroom for the TLS-dependent
-      # lines when the container's best-effort TLS setup fails
-      - run: uv run pytest -q --cov=pgnudge --cov-report=term-missing --cov-fail-under=98
+      # lines when the container's best-effort TLS setup fails. Benchmarks are
+      # perf-only and PG-independent, so they run once in the `benchmark` job,
+      # not across every matrix cell.
+      - run: uv run pytest -q -m "not benchmark" --cov=pgnudge --cov-report=term-missing --cov-fail-under=98
+
+  # parser throughput, no PostgreSQL; runs once, not per matrix cell
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v8.2.0
+      - run: uv sync
+      - run: uv run pytest -m benchmark --benchmark-only
 
   # keeps the wal2json path honest (default matrix runs test_decoding)
   test-wal2json:
@@ -53,4 +64,4 @@ jobs:
           EOF
       - uses: astral-sh/setup-uv@v8.2.0
       - run: uv sync
-      - run: uv run pytest -q --cov=pgnudge --cov-report=term-missing --cov-fail-under=98
+      - run: uv run pytest -q -m "not benchmark" --cov=pgnudge --cov-report=term-missing --cov-fail-under=98
