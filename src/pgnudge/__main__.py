@@ -68,23 +68,34 @@ def build_parser() -> argparse.ArgumentParser:
         description="Watch the parsed pgnudge replication stream.",
     )
     parser.add_argument("--version", action="version", version=f"pgnudge {__version__}")
-    sub = parser.add_subparsers(dest="command", metavar="{wal,raw}")
-    wal = sub.add_parser(
-        "wal",
+    # Always present so main() can test it without a subcommand having run.
+    parser.set_defaults(transport_kind=None)
+    commands = parser.add_subparsers(dest="command", metavar="<command>")
+
+    # Action-first so the top level stays open for future verbs (e.g. an
+    # offline "explain", a config "doctor"); transport is nested under watch.
+    watch = commands.add_parser("watch", help="stream and print the parsed replication feed")
+    transports = watch.add_subparsers(dest="transport", metavar="{logical,physical}")
+    logical = transports.add_parser(
+        "logical",
+        aliases=["wal"],
         parents=[common],
-        help="logical decoding via a temporary slot (needs wal_level=logical)",
+        help="logical decoding via a temporary slot (needs wal_level=logical); alias: wal",
     )
-    wal.add_argument("--plugin", choices=("wal2json", "test_decoding"), default="wal2json")
-    sub.add_parser(
-        "raw",
+    logical.add_argument("--plugin", choices=("wal2json", "test_decoding"), default="wal2json")
+    logical.set_defaults(transport_kind="logical")
+    physical = transports.add_parser(
+        "physical",
+        aliases=["raw"],
         parents=[common],
-        help="slot-less physical WAL, decoded client-side (works at wal_level=replica)",
+        help="slot-less physical WAL, decoded client-side (works at wal_level=replica); alias: raw",
     )
+    physical.set_defaults(transport_kind="physical")
     return parser
 
 
 def _build_feed(args: argparse.Namespace) -> WalFeed | RawFeed:
-    if args.command == "wal":
+    if args.transport_kind == "logical":
         return WalFeed(
             host=args.host,
             port=args.port,
@@ -131,7 +142,9 @@ def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command is None:
-        parser.error("a transport is required: wal or raw")
+        parser.error("a command is required (e.g. watch)")
+    if args.transport_kind is None:
+        parser.error("a transport is required: logical or physical")
     if not args.user:
         parser.error("--user is required (or set PGUSER)")
     if not args.database:
