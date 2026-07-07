@@ -138,6 +138,7 @@ class XLogWalker:
     MAX_RECORD: ClassVar[int] = 1 << 30
     PAGE_MAGICS: ClassVar[frozenset[int]] = frozenset({0xD113, 0xD116, 0xD118})  # PG 16, 17, 18
     XLP_FIRST_IS_CONTRECORD: ClassVar[int] = 0x0001
+    XLR_MAX_BLOCK_ID: ClassVar[int] = 32  # block-reference ids 0..32; 252..255 are special markers
 
     RM_XLOG: ClassVar[int] = 0
     RM_XACT: ClassVar[int] = 1
@@ -361,7 +362,7 @@ class XLogWalker:
                 elif block_id == 252:  # XLR_BLOCK_ID_TOPLEVEL_XID
                     offset += 4
                     remaining -= 4
-                elif block_id <= 31:
+                elif block_id <= self.XLR_MAX_BLOCK_ID:
                     fork_flags = rec[offset]
                     (data_len,) = struct.unpack_from("<H", rec, offset + 1)
                     offset += 3
