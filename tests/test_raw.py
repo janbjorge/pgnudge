@@ -8,7 +8,6 @@ over a live WAL range.
 
 import os
 import re
-import time
 import uuid
 
 import asyncpg
@@ -252,7 +251,6 @@ def waldump_changes(container: PostgresContainer, start: int, end: int, db_oid: 
         cur = waldump_once(container, start, end, db_oid)
         if len(cur) > len(best):
             best = cur
-        time.sleep(0.02)
     return best
 
 
