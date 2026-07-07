@@ -13,6 +13,8 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from typing import ClassVar, TypeAlias
 
+from pgnudge.errors import ConfigError, PgnudgeError
+
 __all__ = [
     "CommitGate",
     "HeaderWalk",
@@ -25,7 +27,7 @@ __all__ = [
 ]
 
 
-class WalSyncError(Exception):
+class WalSyncError(PgnudgeError):
     """The walker lost the record framing; abort the stream and reconnect."""
 
 
@@ -158,7 +160,7 @@ class XLogWalker:
 
     def __post_init__(self) -> None:
         if self.start_lsn % self.BLCKSZ:
-            raise ValueError("start_lsn must be page-aligned; use XLogWalker.page_floor")
+            raise ConfigError("start_lsn must be page-aligned; use XLogWalker.page_floor")
         self.pos = self.start_lsn
         self.buf = bytearray()
 

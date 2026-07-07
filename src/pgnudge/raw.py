@@ -17,7 +17,7 @@ import time
 from dataclasses import dataclass, field
 from typing import ClassVar
 
-from pgnudge.engine import BaseFeed, trace_frame
+from pgnudge.engine import BaseFeed, trace_frame, validate_feed_params
 from pgnudge.proto import StatusFeedback, WalsenderConnection, XLogData, format_lsn, parse_lsn
 from pgnudge.xlog import CommitGate, RelChange, WalSyncError, XLogWalker
 
@@ -103,12 +103,7 @@ class RawFeed(BaseFeed):
             backoff=backoff,
             raw_queue_size=raw_queue_size,
         )
-        if status_interval <= 0:
-            raise ValueError("status_interval must be positive")
-        if liveness_timeout is not None and liveness_timeout <= status_interval:
-            raise ValueError("liveness_timeout must exceed status_interval")
-        if tables is not None and not tables:
-            raise ValueError("tables must be None or a non-empty list")
+        validate_feed_params(status_interval=status_interval, liveness_timeout=liveness_timeout, tables=tables)
         self.host = host
         self.port = port
         self.user = user

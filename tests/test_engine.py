@@ -5,11 +5,43 @@ import asyncio
 import pytest
 
 from pgnudge.core import Batch, Resync
-from pgnudge.engine import Backoff, BaseFeed, Coalescer, Debouncer, FeedService, Intake, Wakeup
+from pgnudge.engine import (
+    Backoff,
+    BaseFeed,
+    Coalescer,
+    Debouncer,
+    FeedService,
+    Intake,
+    Wakeup,
+    validate_feed_params,
+)
 
 
 def wakeup(payload: str, at: float = 1.0) -> Wakeup:
     return Wakeup(payload=payload, at=at)
+
+
+# -- validate_feed_params -----------------------------------------------------
+
+
+def test_validate_feed_params_accepts_valid() -> None:
+    validate_feed_params(status_interval=10.0, liveness_timeout=30.0, tables=["public.t"])
+    validate_feed_params(status_interval=10.0, liveness_timeout=None, tables=None)
+
+
+def test_validate_feed_params_rejects_nonpositive_status_interval() -> None:
+    with pytest.raises(ValueError, match="status_interval"):
+        validate_feed_params(status_interval=0.0, liveness_timeout=None, tables=None)
+
+
+def test_validate_feed_params_rejects_liveness_not_exceeding_status() -> None:
+    with pytest.raises(ValueError, match="liveness_timeout"):
+        validate_feed_params(status_interval=10.0, liveness_timeout=10.0, tables=None)
+
+
+def test_validate_feed_params_rejects_empty_tables() -> None:
+    with pytest.raises(ValueError, match="tables"):
+        validate_feed_params(status_interval=10.0, liveness_timeout=None, tables=[])
 
 
 # -- Coalescer ----------------------------------------------------------------

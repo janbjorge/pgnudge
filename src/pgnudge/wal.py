@@ -18,7 +18,8 @@ import ssl as ssl_module
 import time
 from typing import ClassVar
 
-from pgnudge.engine import BaseFeed, trace_frame
+from pgnudge.engine import BaseFeed, trace_frame, validate_feed_params
+from pgnudge.errors import ConfigError
 from pgnudge.proto import StatusFeedback, WalsenderConnection, XLogData
 
 __all__ = ["WalFeed"]
@@ -73,13 +74,8 @@ class WalFeed(BaseFeed):
             raw_queue_size=raw_queue_size,
         )
         if plugin not in ("wal2json", "test_decoding"):
-            raise ValueError(f"unsupported plugin {plugin!r}")
-        if status_interval <= 0:
-            raise ValueError("status_interval must be positive")
-        if liveness_timeout is not None and liveness_timeout <= status_interval:
-            raise ValueError("liveness_timeout must exceed status_interval")
-        if tables is not None and not tables:
-            raise ValueError("tables must be None or a non-empty list")
+            raise ConfigError(f"unsupported plugin {plugin!r}")
+        validate_feed_params(status_interval=status_interval, liveness_timeout=liveness_timeout, tables=tables)
         self._host = host
         self._port = port
         self._user = user

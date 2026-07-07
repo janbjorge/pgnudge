@@ -16,9 +16,10 @@ from types import TracebackType
 from typing import ClassVar, Self
 
 from pgnudge.core import Batch, Event, FeedItem, Resync
+from pgnudge.errors import ConfigError
 from pgnudge.proto import XLogData, format_lsn, payload_preview
 
-__all__ = ["TRACE", "trace_frame", "Wakeup", "Intake", "Coalescer", "Debouncer", "Backoff", "FeedService", "BaseFeed"]
+__all__ = ["TRACE", "trace_frame", "validate_feed_params", "Wakeup", "Intake", "Coalescer", "Debouncer", "Backoff", "FeedService", "BaseFeed"]
 
 # One step below DEBUG: the per-frame / per-record firehose the CLI turns on
 # at -vvv. Off by default, so the guarded taps that emit at this level cost
@@ -43,6 +44,18 @@ def trace_frame(log: logging.Logger, msg: XLogData, tail: str, *args: object) ->
         payload_preview(msg.payload),
         *args,
     )
+
+
+def validate_feed_params(
+    *, status_interval: float, liveness_timeout: float | None, tables: list[str] | None
+) -> None:
+    """Validate the feedback/liveness/table knobs shared by every transport."""
+    if status_interval <= 0:
+        raise ConfigError("status_interval must be positive")
+    if liveness_timeout is not None and liveness_timeout <= status_interval:
+        raise ConfigError("liveness_timeout must exceed status_interval")
+    if tables is not None and not tables:
+        raise ConfigError("tables must be None or a non-empty list")
 
 
 @dataclass(frozen=True, slots=True)

@@ -18,6 +18,8 @@ from typing import ClassVar, Self
 
 from scramp import ScramClient
 
+from pgnudge.errors import PgnudgeError
+
 __all__ = [
     "PgServerError",
     "XLogData",
@@ -47,7 +49,7 @@ def payload_preview(payload: bytes, limit: int = 48) -> str:
     return head + "..." if len(payload) > limit else head
 
 
-class PgServerError(Exception):
+class PgServerError(PgnudgeError):
     """ErrorResponse from the server, with the field map preserved."""
 
     def __init__(self, fields: dict[str, str]) -> None:
