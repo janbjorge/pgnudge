@@ -2,17 +2,17 @@
 consume loop, and the observability taps; no PostgreSQL.
 """
 
-from __future__ import annotations
-
 import logging
 from types import TracebackType
+from typing import Self
 
 import pytest
 
 from pgnudge import Batch, Event, RawFeed, Resync, WalFeed
 from pgnudge.core import FeedItem
+from pgnudge.doctor import Check, Diagnosis
 from pgnudge.engine import TRACE, BaseFeed
-from pgnudge.__main__ import _build_feed, _format_batch, _verbosity_level, _watch, build_parser, main
+from pgnudge.__main__ import _build_feed, _format_batch, _run_doctor, _verbosity_level, _watch, build_parser, main
 from pgnudge.proto import payload_preview
 
 
@@ -133,6 +133,68 @@ def test_build_feed_passes_tables() -> None:
     assert feed.tables == frozenset({"public.orders"})
 
 
+# -- doctor -------------------------------------------------------------------
+
+
+def test_doctor_command_parses_with_plugin_default() -> None:
+    args = build_parser().parse_args(["doctor", "--user", "u", "--database", "d"])
+    assert args.command == "doctor"
+    assert args.plugin == "wal2json"
+
+
+def test_doctor_plugin_is_selectable() -> None:
+    args = build_parser().parse_args(["doctor", "--user", "u", "--database", "d", "--plugin", "test_decoding"])
+    assert args.plugin == "test_decoding"
+
+
+def _fake_diagnose(recommended: str | None) -> object:
+    async def diagnose(**kwargs: object) -> Diagnosis:
+        return Diagnosis(
+            checks=(Check("connect", True, "connected"), Check("WalFeed (logical decoding)", recommended is not None, "x")),
+            recommended=recommended,
+        )
+
+    return diagnose
+
+
+async def test_run_doctor_prints_checks_and_recommendation(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("pgnudge.__main__.diagnose", _fake_diagnose("WalFeed"))
+    args = build_parser().parse_args(["doctor", "--user", "u", "--database", "d"])
+    ok = await _run_doctor(args)
+    assert ok
+    out = capsys.readouterr().out
+    assert "[ok] connect: connected" in out
+    assert "recommended transport: WalFeed" in out
+
+
+async def test_run_doctor_reports_no_transport(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("pgnudge.__main__.diagnose", _fake_diagnose(None))
+    args = build_parser().parse_args(["doctor", "--user", "u", "--database", "d"])
+    ok = await _run_doctor(args)
+    assert not ok
+    out = capsys.readouterr().out
+    assert "[FAIL] WalFeed (logical decoding)" in out
+    assert "no transport available" in out
+
+
+def test_main_doctor_exits_zero_when_a_transport_works(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("pgnudge.__main__.diagnose", _fake_diagnose("RawFeed"))
+    with pytest.raises(SystemExit) as exc:
+        main(["doctor", "--user", "u", "--database", "d"])
+    assert exc.value.code == 0
+
+
+def test_main_doctor_exits_one_when_no_transport(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("pgnudge.__main__.diagnose", _fake_diagnose(None))
+    with pytest.raises(SystemExit) as exc:
+        main(["doctor", "--user", "u", "--database", "d"])
+    assert exc.value.code == 1
+
+
 # -- output formatting --------------------------------------------------------
 
 
@@ -156,7 +218,7 @@ class ReplayFeed(BaseFeed):
         super().__init__()
         self._items = items
 
-    async def __aenter__(self) -> ReplayFeed:
+    async def __aenter__(self) -> Self:
         return self
 
     async def __aexit__(
@@ -167,7 +229,7 @@ class ReplayFeed(BaseFeed):
     ) -> None:
         return None
 
-    def __aiter__(self) -> ReplayFeed:
+    def __aiter__(self) -> Self:
         self._it = iter(self._items)
         return self
 

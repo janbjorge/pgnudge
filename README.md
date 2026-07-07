@@ -53,8 +53,13 @@ direct connection (replication traffic cannot go through a pooler like
 PgBouncer). Then:
 
 1. `pip install pgnudge`
-2. point a feed at the database (the tour below)
-3. handle the two items: `Resync` → reload everything, `Batch` → reload
+2. `pgnudge doctor --host ... --user ... --database ...` — it connects,
+   checks `wal_level`, the `REPLICATION` grant, and the output plugin, then
+   tells you which feed to use (or exactly what to fix). The WalFeed check
+   creates a temporary slot and drops it, so `doctor` leaves nothing behind
+   either.
+3. point that feed at the database (the tour below)
+4. handle the two items: `Resync` → reload everything, `Batch` → reload
    the named tables
 
 That is the whole setup. Nothing is installed in the database and nothing
@@ -250,6 +255,12 @@ slot dies with the bridge.
   configured by the library) reports connect failures and stream errors at
   WARNING, successful (re)connects at INFO, and backoff timing at DEBUG.
   A feed that reconnects in a loop is visible, not silent.
+- Errors: every exception pgnudge raises inherits `PgnudgeError`, so
+  `except PgnudgeError` catches them all. `ConfigError` (bad constructor
+  argument) also inherits `ValueError`, so an existing `except ValueError`
+  keeps working. Stream and connection failures are internal lifecycle:
+  the supervisor catches them, backs off, and reconnects with a `Resync`;
+  they do not surface on the iterator.
 
 ## Tested how
 

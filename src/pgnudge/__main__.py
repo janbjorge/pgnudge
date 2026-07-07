@@ -14,14 +14,13 @@ Connection settings fall back to the libpq ``PG*`` environment variables
 (PGHOST, PGPORT, PGUSER, PGDATABASE, PGPASSWORD); explicit flags win.
 """
 
-from __future__ import annotations
-
 import argparse
 import asyncio
 import logging
 import os
 
 from pgnudge import Batch, RawFeed, Resync, WalFeed, __version__
+from pgnudge.doctor import diagnose
 from pgnudge.engine import TRACE, BaseFeed
 
 _LEVELS = (logging.WARNING, logging.INFO, logging.DEBUG, TRACE)
@@ -37,14 +36,23 @@ def _env_int(name: str, fallback: int) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    common = argparse.ArgumentParser(add_help=False)
-    conn = common.add_argument_group("connection")
+    connection = argparse.ArgumentParser(add_help=False)
+    conn = connection.add_argument_group("connection")
     conn.add_argument("--host", default=os.environ.get("PGHOST", "127.0.0.1"))
     conn.add_argument("--port", type=int, default=_env_int("PGPORT", 5432))
     conn.add_argument("--user", default=os.environ.get("PGUSER"))
     conn.add_argument("--database", default=os.environ.get("PGDATABASE"))
     conn.add_argument("--password", default=os.environ.get("PGPASSWORD"))
     conn.add_argument("--ssl", action="store_true", help="require TLS")
+    connection.add_argument(
+        "-v",
+        "--verbose",
+        action="count",
+        default=0,
+        help="repeat for more: -v lifecycle, -vv names, -vvv frames+records",
+    )
+
+    common = argparse.ArgumentParser(add_help=False, parents=[connection])
     common.add_argument(
         "--table",
         action="append",
@@ -55,25 +63,26 @@ def build_parser() -> argparse.ArgumentParser:
     knobs.add_argument("--debounce", type=float, default=0.05, help="quiet window before a batch closes (s)")
     knobs.add_argument("--status-interval", type=float, default=10.0, dest="status_interval")
     knobs.add_argument("--failsafe", type=float, default=None, help="emit a periodic resync every N seconds")
-    common.add_argument(
-        "-v",
-        "--verbose",
-        action="count",
-        default=0,
-        help="repeat for more: -v lifecycle, -vv names, -vvv frames+records",
-    )
 
     parser = argparse.ArgumentParser(
         prog="pgnudge",
-        description="Watch the parsed pgnudge replication stream.",
+        description="Watch the parsed pgnudge replication stream, or check server readiness.",
     )
     parser.add_argument("--version", action="version", version=f"pgnudge {__version__}")
     # Always present so main() can test it without a subcommand having run.
     parser.set_defaults(transport_kind=None)
     commands = parser.add_subparsers(dest="command", metavar="<command>")
 
-    # Action-first so the top level stays open for future verbs (e.g. an
-    # offline "explain", a config "doctor"); transport is nested under watch.
+    # Action-first so the top level stays open for more verbs; transport is
+    # nested under watch, and doctor is a sibling that needs no transport.
+    doctor = commands.add_parser("doctor", parents=[connection], help="probe the server and recommend a transport")
+    doctor.add_argument(
+        "--plugin",
+        choices=("wal2json", "test_decoding"),
+        default="wal2json",
+        help="output plugin to probe for the WalFeed (logical) check",
+    )
+
     watch = commands.add_parser("watch", help="stream and print the parsed replication feed")
     transports = watch.add_subparsers(dest="transport", metavar="{logical,physical}")
     logical = transports.add_parser(
@@ -128,6 +137,26 @@ def _format_batch(batch: Batch) -> str:
     return "batch: " + ", ".join(parts)
 
 
+async def _run_doctor(args: argparse.Namespace) -> bool:
+    """Print the readiness report; return whether any transport works."""
+    diag = await diagnose(
+        host=args.host,
+        port=args.port,
+        user=args.user,
+        database=args.database,
+        password=args.password,
+        ssl=args.ssl,
+        plugin=args.plugin,
+    )
+    for check in diag.checks:
+        print(f"[{'ok' if check.ok else 'FAIL'}] {check.name}: {check.detail}", flush=True)
+    if diag.recommended is not None:
+        print(f"\nrecommended transport: {diag.recommended}", flush=True)
+    else:
+        print("\nno transport available; fix the FAILed checks above", flush=True)
+    return diag.recommended is not None
+
+
 async def _watch(feed: BaseFeed) -> None:
     async with feed:
         async for item in feed:
@@ -142,8 +171,8 @@ def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command is None:
-        parser.error("a command is required (e.g. watch)")
-    if args.transport_kind is None:
+        parser.error("a command is required (e.g. watch, doctor)")
+    if args.command == "watch" and args.transport_kind is None:
         parser.error("a transport is required: logical or physical")
     if not args.user:
         parser.error("--user is required (or set PGUSER)")
@@ -154,6 +183,9 @@ def main(argv: list[str] | None = None) -> None:
     # libraries (asyncio, etc.) stay at WARNING so -vvv isn't drowned out.
     logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     logging.getLogger("pgnudge").setLevel(_verbosity_level(args.verbose))
+
+    if args.command == "doctor":
+        raise SystemExit(0 if asyncio.run(_run_doctor(args)) else 1)
     try:
         asyncio.run(_watch(_build_feed(args)))
     except KeyboardInterrupt:

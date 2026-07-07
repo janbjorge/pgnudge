@@ -89,6 +89,15 @@ src/pgnudge/
               Event is payload/first_seen/count. `channel` and
               `payload_filter` were dropped before release; do not
               reintroduce them.
+  errors.py   The exception root: PgnudgeError(Exception) and
+              ConfigError(PgnudgeError, ValueError). Everything pgnudge
+              raises inherits PgnudgeError (PgServerError in proto.py and
+              WalSyncError in xlog.py are reparented, defined in place).
+              ConfigError also inherits ValueError so `except ValueError`
+              on bad construction args keeps working (non-breaking).
+              Imports nothing internal. Connection/reset I/O errors in
+              raw/proto stay stdlib on purpose: they are I/O conditions
+              the supervisor catches, not pgnudge-semantic errors.
   xlog.py     Sans-io physical-WAL walker: XLogWalker (page framing,
               record reassembly, heap/heap2 change extraction via block
               references, xact commit/abort/prepare with subxids,
@@ -135,6 +144,19 @@ src/pgnudge/
               keepalive back, and inbound silence past the timeout aborts
               the socket to force a reconnect (never wait_for on reads).
               Lifecycle logging on the "pgnudge.wal" logger.
+  doctor.py   Preflight: diagnose(...) runs the real handshakes and returns
+              a Diagnosis (tuple[Check] + recommended transport). Plain
+              connection reads version / wal_level / REPLICATION; a
+              TEMPORARY logical slot probes WalFeed-readiness (and dies with
+              the probe connection, zero footprint); IDENTIFY_SYSTEM probes
+              RawFeed-readiness. Every probe failure is a Check, never a
+              raise. No PostgreSQL in tests/test_doctor_unit.py (scripted
+              walsender branches on the replication startup param).
+  __main__.py CLI (`pgnudge`): verb-first subcommands. `watch
+              <logical|physical>` streams and prints the parsed feed;
+              `doctor` prints the readiness report and exits 0 if any
+              transport works else 1. Connection flags fall back to libpq
+              PG* env vars; -v/-vv/-vvv ladder maps WARNING/INFO/DEBUG/TRACE.
 tests/
   conftest.py  session-scoped PostgreSQL via testcontainers, scratch
                database per test, best-effort TLS enable (self-signed

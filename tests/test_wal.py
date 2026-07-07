@@ -8,6 +8,7 @@ import pytest
 from conftest import PgParams, create_tables, expect, expect_quiet
 
 from pgnudge import Batch, Resync, WalFeed
+from pgnudge.doctor import diagnose
 
 # live tests are exempt from the 2s budget: the first one pays for the
 # session-scoped container pull + start
@@ -130,6 +131,24 @@ async def test_hard_abort_leaves_no_slots(pg: PgParams, admin: asyncpg.Connectio
         await expect(feed, Resync)
         assert len(await slots(admin)) == 1
     await asyncio.sleep(0.5)
+    assert await slots(admin) == []
+
+
+async def test_doctor_recommends_walfeed_and_leaves_no_slot(pg: PgParams, admin: asyncpg.Connection) -> None:
+    # doctor's WalFeed probe creates a TEMPORARY slot; it must vanish with
+    # the probe connection, same zero-footprint guarantee as the product.
+    assert await slots(admin) == []
+    diag = await diagnose(
+        host=pg.host,
+        port=pg.port,
+        user=pg.user,
+        password=pg.password,
+        database=pg.database,
+        plugin=pg.plugin,
+    )
+    assert diag.recommended == "WalFeed"
+    assert all(check.ok for check in diag.checks), [c for c in diag.checks if not c.ok]
+    await asyncio.sleep(0.3)
     assert await slots(admin) == []
 
 
