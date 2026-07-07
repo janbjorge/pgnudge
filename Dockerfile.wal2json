@@ -1,0 +1,6 @@
+# Local test image: official Postgres + wal2json (no public image ships it).
+# Mirrors the CI `test-wal2json` build. Bump the version in both places together.
+FROM postgres:16
+RUN apt-get update -o Dir::Etc::sourcelist="sources.list.d/pgdg.list" -o Dir::Etc::sourceparts="-" \
+    && apt-get install -y --no-install-recommends postgresql-16-wal2json \
+    && rm -rf /var/lib/apt/lists/*
