@@ -10,15 +10,14 @@ Mechanism: docs/physical-wal.md.
 """
 
 import asyncio
-import contextlib
 import logging
 import ssl as ssl_module
 import time
 from dataclasses import dataclass, field
 from typing import ClassVar
 
-from pgnudge.engine import BaseFeed, trace_frame, validate_feed_params
-from pgnudge.proto import StatusFeedback, WalsenderConnection, XLogData, format_lsn, parse_lsn
+from pgnudge.engine import BaseFeed, trace_frame
+from pgnudge.proto import WalsenderConnection, XLogData, format_lsn, parse_lsn
 from pgnudge.xlog import CommitGate, RelChange, WalSyncError, XLogWalker
 
 __all__ = ["RawFeed", "RelResolver"]
@@ -97,13 +96,16 @@ class RawFeed(BaseFeed):
         raw_queue_size: int = 8192,
     ) -> None:
         super().__init__(
+            status_interval=status_interval,
+            liveness_timeout=liveness_timeout,
+            connect_timeout=connect_timeout,
+            tables=tables,
             debounce=debounce,
             max_batch_wait=max_batch_wait,
             failsafe=failsafe,
             backoff=backoff,
             raw_queue_size=raw_queue_size,
         )
-        validate_feed_params(status_interval=status_interval, liveness_timeout=liveness_timeout, tables=tables)
         self.host = host
         self.port = port
         self.user = user
@@ -112,14 +114,10 @@ class RawFeed(BaseFeed):
         self.ssl = ssl
         self.tables = frozenset(tables) if tables is not None else None
         self.application_name = application_name
-        self.status_interval = status_interval
-        self.liveness_timeout = liveness_timeout
-        self.connect_timeout = connect_timeout
 
         self.stream_conn: WalsenderConnection | None = None
         self.catalog_conn: WalsenderConnection | None = None
         self.last_lsn = 0
-        self.last_inbound = time.monotonic()
 
     # -- teardown ---------------------------------------------------------------
 
@@ -159,12 +157,11 @@ class RawFeed(BaseFeed):
             except Exception as exc:
                 self.log.warning("connect to %s:%d failed: %s", self.host, self.port, exc)
                 attempt += 1
-                await self.reconnect_pause(attempt)
+                await self._reconnect_pause(attempt)
                 continue
 
             self.stream_conn = stream
             self.connection_pid = stream.backend_pid
-            feedback: asyncio.Task[None] | None = None
             try:
                 catalog = await self.connect_once("database")
                 self.catalog_conn = catalog
@@ -202,46 +199,40 @@ class RawFeed(BaseFeed):
                 gate = CommitGate()
                 self.last_lsn = flush_lsn
                 self.last_inbound = time.monotonic()
-                feedback = asyncio.create_task(self._feedback_loop(stream))
-                while True:
-                    msg = await stream.read_stream()
-                    self.last_inbound = time.monotonic()
-                    self.last_lsn = max(self.last_lsn, msg.end_lsn)
-                    if isinstance(msg, XLogData):
-                        expected = walker.pos + len(walker.buf)
-                        if msg.start_lsn != expected:
-                            raise WalSyncError(
-                                f"stream position {format_lsn(msg.start_lsn)}"
-                                f" does not follow {format_lsn(expected)}"
-                            )
-                        events = walker.feed(msg.payload)
-                        released = gate.push(events)
-                        trace_frame(self.log, msg, "events=%s released=%s", events, released)
-                        if released:
-                            await self.push_committed(released, resolver)
-                    elif msg.reply_requested:
-                        await stream.send_standby_status(self.last_lsn)
+                async with self._feedback_running(stream):
+                    while True:
+                        msg = await stream.read_stream()
+                        self.last_inbound = time.monotonic()
+                        self.last_lsn = max(self.last_lsn, msg.end_lsn)
+                        if isinstance(msg, XLogData):
+                            expected = walker.pos + len(walker.buf)
+                            if msg.start_lsn != expected:
+                                raise WalSyncError(
+                                    f"stream position {format_lsn(msg.start_lsn)}"
+                                    f" does not follow {format_lsn(expected)}"
+                                )
+                            events = walker.feed(msg.payload)
+                            released = gate.push(events)
+                            trace_frame(self.log, msg, "events=%s released=%s", events, released)
+                            if released:
+                                await self.push_committed(released, resolver)
+                        elif msg.reply_requested:
+                            await stream.send_standby_status(self.last_lsn)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 # fall through to reconnect from the new flush position
                 self.log.warning("stream error, reconnecting: %s", exc)
             finally:
-                if feedback is not None:
-                    feedback.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await feedback
                 self.connection_pid = None
                 self.abort_connections()
 
             if not self._closing:
                 attempt += 1
-                await self.reconnect_pause(attempt)
+                await self._reconnect_pause(attempt)
 
-    async def reconnect_pause(self, attempt: int) -> None:
-        delay = self._backoff_delay(attempt)
-        self.log.debug("reconnect attempt %d in %.2fs", attempt, delay)
-        await asyncio.sleep(delay)
+    def _current_lsn(self) -> int:
+        return self.last_lsn
 
     async def push_committed(self, committed: list[RelChange], resolver: RelResolver) -> None:
         mine = [change for change in committed if change.db_oid == resolver.db_oid]
@@ -252,13 +243,3 @@ class RawFeed(BaseFeed):
             name = names.get(change.relfilenode)
             if name and (self.tables is None or name in self.tables):
                 self._push_raw(name)
-
-    async def _feedback_loop(self, conn: WalsenderConnection) -> None:
-        await StatusFeedback(
-            conn=conn,
-            interval=self.status_interval,
-            liveness=self.liveness_timeout,
-            lsn=lambda: self.last_lsn,
-            idle=lambda: time.monotonic() - self.last_inbound,
-            log=self.log,
-        ).run()
