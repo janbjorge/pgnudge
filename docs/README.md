@@ -13,5 +13,9 @@ For users deciding whether and how to run pgnudge:
 
 For contributors working on the parsers:
 
+- [parsing-walkthrough.md](parsing-walkthrough.md): a guided tour —
+  follow one row change from wire bytes to `schema.table`, step by step.
+  Start here to build the mental model.
 - [parsing.md](parsing.md): wire frames, WAL record and page layouts,
-  and the structures each layer produces, byte by byte.
+  and the structures each layer produces, byte by byte. The reference to
+  look things up in.
