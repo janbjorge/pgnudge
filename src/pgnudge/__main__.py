@@ -80,7 +80,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Action-first so the top level stays open for more verbs; transport is
     # nested under watch, and doctor is a sibling that needs no transport.
-    doctor = commands.add_parser("doctor", parents=[connection], help="probe the server and recommend a transport")
+    doctor = commands.add_parser(
+        "doctor", parents=[connection], help="probe the server and recommend a transport"
+    )
     doctor.add_argument(
         "--plugin",
         choices=("wal2json", "test_decoding"),

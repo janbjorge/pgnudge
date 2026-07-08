@@ -164,10 +164,12 @@ class WalFeed(BaseFeed):
                 self.connection_pid = conn.backend_pid
                 slot = f"pgnudge_{os.getpid()}_{secrets.token_hex(3)}"
                 try:
-                    await conn.simple_query(
-                        # SNAPSHOT 'nothing': from-connect-only, the Resync refetch is the backfill
-                        f"CREATE_REPLICATION_SLOT \"{slot}\" TEMPORARY LOGICAL {self.plugin} (SNAPSHOT 'nothing')"
+                    # SNAPSHOT 'nothing': from-connect-only, the Resync refetch is the backfill
+                    create_slot = (
+                        f'CREATE_REPLICATION_SLOT "{slot}" TEMPORARY LOGICAL '
+                        f"{self.plugin} (SNAPSHOT 'nothing')"
                     )
+                    await conn.simple_query(create_slot)
                     await conn.start_replication(
                         f'START_REPLICATION SLOT "{slot}" LOGICAL 0/0 ({self._plugin_options()})'
                     )

@@ -12,7 +12,7 @@ import logging
 import random
 import time
 from collections.abc import AsyncIterator, Callable, Coroutine
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import TracebackType
 from typing import ClassVar, Self
 
@@ -20,7 +20,18 @@ from pgnudge.core import Batch, Event, FeedItem, Resync
 from pgnudge.errors import ConfigError
 from pgnudge.proto import StatusFeedback, WalsenderConnection, XLogData, format_lsn, payload_preview
 
-__all__ = ["TRACE", "trace_frame", "validate_feed_params", "Wakeup", "Intake", "Coalescer", "Debouncer", "Backoff", "FeedService", "BaseFeed"]
+__all__ = [
+    "TRACE",
+    "trace_frame",
+    "validate_feed_params",
+    "Wakeup",
+    "Intake",
+    "Coalescer",
+    "Debouncer",
+    "Backoff",
+    "FeedService",
+    "BaseFeed",
+]
 
 # One step below DEBUG: the per-frame / per-record firehose the CLI turns on
 # at -vvv. Off by default, so the guarded taps that emit at this level cost
@@ -124,9 +135,7 @@ class Coalescer:
         if prev is None:
             self.pending[wakeup.payload] = Event(payload=wakeup.payload, first_seen=wakeup.at)
         else:
-            self.pending[wakeup.payload] = Event(
-                payload=prev.payload, first_seen=prev.first_seen, count=prev.count + 1
-            )
+            self.pending[wakeup.payload] = replace(prev, count=prev.count + 1)
 
     def flush(self) -> Batch:
         """Return the buffered window as a ``Batch`` and reset."""
@@ -209,7 +218,9 @@ class FeedService:
         self.tasks.append(asyncio.create_task(supervisor(), name=f"{name}-supervisor"))
         self.tasks.append(asyncio.create_task(self._pump(), name=f"{name}-pump"))
         if self.failsafe is not None:
-            self.tasks.append(asyncio.create_task(self._failsafe_loop(self.failsafe), name=f"{name}-failsafe"))
+            self.tasks.append(
+                asyncio.create_task(self._failsafe_loop(self.failsafe), name=f"{name}-failsafe")
+            )
 
     async def aclose(self) -> None:
         if self.closing:
@@ -266,7 +277,9 @@ class BaseFeed:
         backoff: tuple[float, float] = (0.1, 5.0),
         raw_queue_size: int = 8192,
     ) -> None:
-        validate_feed_params(status_interval=status_interval, liveness_timeout=liveness_timeout, tables=tables)
+        validate_feed_params(
+            status_interval=status_interval, liveness_timeout=liveness_timeout, tables=tables
+        )
         self._service = FeedService(
             intake=Intake(maxsize=raw_queue_size),
             debouncer=Debouncer(
