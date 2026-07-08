@@ -43,6 +43,7 @@ def scripted_doctor(
     version: object = b"170002",
     wal_level: object = b"logical",
     privileged: object = b"t",
+    platform: tuple[bytes | None, bytes | None, bytes | None] | None = (b"f", b"f", b"f"),
     logical_error: tuple[str, str] | None = None,
     physical: str = "ok",  # "ok" | "empty" | "error"
 ) -> Handler:
@@ -56,6 +57,10 @@ def scripted_doctor(
                 await read_frame(reader)
                 writer.write(_row_reply(value))
                 await writer.drain()
+            await read_frame(reader)  # platform fingerprint: one row, three booleans
+            row = ready_for_query() if platform is None else data_row(*platform) + ready_for_query()
+            writer.write(row)
+            await writer.drain()
         elif mode == "database":
             await read_frame(reader)
             if logical_error is not None:
@@ -154,12 +159,139 @@ async def test_physical_probe_empty_row_fails() -> None:
 
 
 async def test_missing_plugin_gets_a_hint() -> None:
-    handler = scripted_doctor(logical_error=("58P01", 'could not open extension control file'), physical="ok")
+    handler = scripted_doctor(logical_error=("58P01", "could not open extension control file"), physical="ok")
     async with scripted_server(handler) as (host, port):
         diag = await _diagnose(host, port)
     walfeed = _check(diag, "WalFeed (logical decoding)")
     assert "output plugin not installed" in walfeed.detail
+    assert walfeed.fix is not None and "test_decoding" in walfeed.fix  # install wal2json or fall back
     assert diag.recommended == "RawFeed"
+
+
+# -- test_decoding fallback ---------------------------------------------------
+
+
+async def test_walfeed_falls_back_to_test_decoding_when_wal2json_missing() -> None:
+    """A missing wal2json (58P01) retries with test_decoding; logical still works."""
+    db_calls = 0
+
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        nonlocal db_calls
+        params = await read_startup(reader)
+        writer.write(_handshake())
+        await writer.drain()
+        mode = params.get("replication")
+        if mode == "false":
+            for value in (b"170002", b"logical", b"t"):
+                await read_frame(reader)
+                writer.write(data_row(value) + ready_for_query())
+                await writer.drain()
+            await read_frame(reader)
+            writer.write(data_row(b"f", b"f", b"f") + ready_for_query())
+            await writer.drain()
+        elif mode == "database":
+            _mtype, body = await read_frame(reader)
+            db_calls += 1
+            if b"wal2json" in body:
+                writer.write(error_response("could not open extension control file", "58P01") + ready_for_query())
+            else:
+                writer.write(ready_for_query())
+            await writer.drain()
+        elif mode == "true":
+            await read_frame(reader)
+            writer.write(data_row(b"sys", b"1", b"0/0", None) + ready_for_query())
+            await writer.drain()
+        await reader.read()
+
+    async with scripted_server(handler) as (host, port):
+        diag = await _diagnose(host, port)  # default plugin wal2json
+    walfeed = _check(diag, "WalFeed (logical decoding)")
+    assert walfeed.ok
+    assert "test_decoding fallback" in walfeed.detail
+    assert diag.recommended == "WalFeed"
+    assert db_calls == 2  # wal2json probe, then the test_decoding fallback
+
+
+# -- platform-aware fixes -----------------------------------------------------
+
+
+async def test_detects_rds_and_tailors_fixes() -> None:
+    handler = scripted_doctor(
+        platform=(b"t", b"f", b"f"),
+        privileged=b"f",
+        wal_level=b"replica",
+        logical_error=("55000", "logical decoding requires wal_level >= logical"),
+        physical="error",
+    )
+    async with scripted_server(handler) as (host, port):
+        diag = await _diagnose(host, port)
+    assert _check(diag, "platform").detail.endswith("Amazon RDS / Aurora")
+    role_fix = _check(diag, "REPLICATION role").fix
+    assert role_fix is not None and "rds_replication" in role_fix
+    walfeed_fix = _check(diag, "WalFeed (logical decoding)").fix
+    assert walfeed_fix is not None and "rds.logical_replication" in walfeed_fix
+    physical_fix = _check(diag, "RawFeed (physical WAL)").fix
+    assert physical_fix is not None and "use WalFeed" in physical_fix
+
+
+async def test_self_managed_fixes_use_alter_system() -> None:
+    handler = scripted_doctor(
+        privileged=b"f",
+        wal_level=b"replica",
+        logical_error=("55000", "logical decoding requires wal_level >= logical"),
+        physical="error",
+    )
+    async with scripted_server(handler) as (host, port):
+        diag = await _diagnose(host, port)
+    assert _check(diag, "platform").detail.endswith("self-managed / undetected")
+    role_fix = _check(diag, "REPLICATION role").fix
+    assert role_fix is not None and "ALTER ROLE" in role_fix
+    walfeed_fix = _check(diag, "WalFeed (logical decoding)").fix
+    assert walfeed_fix is not None and "ALTER SYSTEM SET wal_level" in walfeed_fix
+    physical_fix = _check(diag, "RawFeed (physical WAL)").fix
+    assert physical_fix is not None and "pg_hba.conf" in physical_fix
+
+
+async def test_detects_azure_and_tailors_fixes() -> None:
+    handler = scripted_doctor(
+        platform=(b"f", b"t", b"f"),
+        privileged=b"f",
+        wal_level=b"replica",
+        logical_error=("55000", "logical decoding requires wal_level >= logical"),
+        physical="error",
+    )
+    async with scripted_server(handler) as (host, port):
+        diag = await _diagnose(host, port)
+    assert _check(diag, "platform").detail.endswith("Azure Flexible Server")
+    role_fix = _check(diag, "REPLICATION role").fix
+    assert role_fix is not None and "azure_pg_admin" in role_fix
+    walfeed_fix = _check(diag, "WalFeed (logical decoding)").fix
+    assert walfeed_fix is not None and "az postgres flexible-server" in walfeed_fix
+    physical_fix = _check(diag, "RawFeed (physical WAL)").fix
+    assert physical_fix is not None and "managed platforms usually block" in physical_fix
+
+
+async def test_detects_gcp_and_tailors_fixes() -> None:
+    handler = scripted_doctor(
+        platform=(b"f", b"f", b"t"),
+        wal_level=b"replica",
+        logical_error=("55000", "logical decoding requires wal_level >= logical"),
+        physical="error",
+    )
+    async with scripted_server(handler) as (host, port):
+        diag = await _diagnose(host, port)
+    assert _check(diag, "platform").detail.endswith("Google Cloud SQL")
+    walfeed_fix = _check(diag, "WalFeed (logical decoding)").fix
+    assert walfeed_fix is not None and "cloudsql.logical_decoding" in walfeed_fix
+    physical_fix = _check(diag, "RawFeed (physical WAL)").fix
+    assert physical_fix is not None and "managed platforms usually block" in physical_fix
+
+
+async def test_platform_detection_tolerates_missing_row() -> None:
+    """A server that returns no fingerprint row is treated as self-managed."""
+    async with scripted_server(scripted_doctor(platform=None)) as (host, port):
+        diag = await _diagnose(host, port)
+    assert _check(diag, "platform").detail.endswith("self-managed / undetected")
 
 
 async def test_plugin_argument_is_probed() -> None:
@@ -175,6 +307,9 @@ async def test_plugin_argument_is_probed() -> None:
                 await read_frame(reader)
                 writer.write(data_row(b"170002") + ready_for_query())
                 await writer.drain()
+            await read_frame(reader)  # platform fingerprint
+            writer.write(data_row(b"f", b"f", b"f") + ready_for_query())
+            await writer.drain()
         elif mode == "database":
             _mtype, body = await read_frame(reader)
             seen["slot"] = body

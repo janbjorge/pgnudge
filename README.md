@@ -59,8 +59,10 @@ database driver** - pgnudge speaks the PostgreSQL replication protocol itself.
   your view wrong. No cursors to persist, no exactly-once to get wrong.
 - **async-first and typed.** `async for item in feed`. Strict mypy, 100%
   line+branch coverage, claims proven against real PostgreSQL in CI.
-- **Preflight `doctor`.** One command connects, checks the server, and tells
-  you which feed to use (or exactly what to fix) - leaving nothing behind.
+- **Preflight `doctor`.** One command connects, fingerprints the platform
+  (RDS/Aurora, Azure, Cloud SQL, or self-managed), and tells you which feed to
+  use - with a copy-paste fix under every failed check, tailored to that
+  platform. Leaves nothing behind.
 
 ## Should you use pgnudge?
 
@@ -105,8 +107,12 @@ Then:
 1. `pip install pgnudge`
 2. `pgnudge doctor --host ... --user ... --database ...` - it connects, checks
    `wal_level`, the `REPLICATION` grant, and the output plugin, then tells you
-   which feed to use (or exactly what to fix). The WalFeed check creates a
-   temporary slot and drops it, so `doctor` leaves nothing behind either.
+   which feed to use, printing a copy-paste fix under any failed check (tuned
+   to the detected platform: RDS parameter groups, `az` commands, or plain
+   `ALTER SYSTEM`). If `wal2json` is absent it retries with the built-in
+   `test_decoding` so it can distinguish "logical decoding is blocked" from
+   "logical works, the plugin just is not installed". The WalFeed check
+   creates a temporary slot and drops it, so `doctor` leaves nothing behind.
 3. point that feed at the database (the tour below)
 4. handle the two items: `Resync` -> reload everything, `Batch` -> reload the
    named tables
