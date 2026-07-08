@@ -28,3 +28,6 @@ htmlcov/
 # claude session artifacts — never commit
 .claude/
 docs/parsing-walkthrough.md
+
+# pytest-benchmark autosave artifacts (machine-specific)
+.benchmarks/

@@ -40,8 +40,8 @@ class WalFeed(BaseFeed):
 
     log: ClassVar[logging.Logger] = logging.getLogger("pgnudge.wal")
 
-    _TEST_DECODING_RE: ClassVar[re.Pattern[str]] = re.compile(
-        r"^table (.+?): (?:INSERT|UPDATE|DELETE|TRUNCATE)"
+    _TEST_DECODING_RE: ClassVar[re.Pattern[bytes]] = re.compile(
+        rb"^table (.+?): (?:INSERT|UPDATE|DELETE|TRUNCATE)"
     )
 
     def __init__(
@@ -108,9 +108,11 @@ class WalFeed(BaseFeed):
     @classmethod
     def _parse_test_decoding(cls, payload: bytes) -> list[str]:
         """One test_decoding text line to affected tables; non-DML lines parse to []."""
-        # TRUNCATE lists every affected table on one line, ", "-joined
-        m = cls._TEST_DECODING_RE.match(payload.decode("utf-8", "replace"))
-        return m.group(1).split(", ") if m else []
+        # Match on bytes and decode only the captured table list: a wide row
+        # line's column dump never needs decoding. TRUNCATE lists every
+        # affected table on one line, ", "-joined.
+        m = cls._TEST_DECODING_RE.match(payload)
+        return m.group(1).decode("utf-8", "replace").split(", ") if m else []
 
     # -- teardown ---------------------------------------------------------------
 

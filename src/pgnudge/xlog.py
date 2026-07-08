@@ -162,6 +162,14 @@ class XLogWalker:
 
     log: ClassVar[logging.Logger] = logging.getLogger("pgnudge.xlog")
 
+    # precompiled once: struct.unpack_from(fmt, ...) reparses fmt every call
+    _S_LEN: ClassVar[struct.Struct] = struct.Struct("<I")  # record/block-data length
+    _S_REC_HDR: ClassVar[struct.Struct] = struct.Struct("<IIQBB")  # tot_len,xid,prev,info,rmid
+    _S_PAGE_HDR: ClassVar[struct.Struct] = struct.Struct("<HHIQI")  # magic,info,tli,pageaddr,rem_len
+    _S_LONG_TAIL: ClassVar[struct.Struct] = struct.Struct("<QII")  # sysid,seg_size,blcksz
+    _S_XINFO: ClassVar[struct.Struct] = struct.Struct("<I")  # xact xinfo word
+    _S_SUBXCNT: ClassVar[struct.Struct] = struct.Struct("<i")  # subxid count
+
     BLCKSZ: ClassVar[int] = 8192
     ALIGN: ClassVar[int] = 8
     SHORT_PHD: ClassVar[int] = 24
@@ -221,6 +229,8 @@ class XLogWalker:
         return [event for rec in self.records() if (event := self.parse_record(rec)) is not None]
 
     def consume(self, n: int) -> None:
+        # CPython bytearray tracks an internal start offset, so front deletion
+        # is amortized O(1); no manual cursor needed.
         del self.buf[:n]
         self.pos += n
 
@@ -263,7 +273,7 @@ class XLogWalker:
                 self.rec += self.buf[:take]
                 self.consume(take)
                 if len(self.rec) == 4:
-                    (tot_len,) = struct.unpack_from("<I", self.rec)
+                    (tot_len,) = self._S_LEN.unpack_from(self.rec)
                     if tot_len < self.REC_HDR or tot_len > self.MAX_RECORD:
                         raise WalSyncError(f"implausible record length {tot_len} at 0x{self.pos:X}")
                     self.rec_need = tot_len
@@ -293,7 +303,7 @@ class XLogWalker:
         size = self.LONG_PHD if self.pos % self.seg_size == 0 else self.SHORT_PHD
         if len(self.buf) < size:
             return False
-        magic, info, _tli, pageaddr, rem_len = struct.unpack_from("<HHIQI", self.buf)
+        magic, info, _tli, pageaddr, rem_len = self._S_PAGE_HDR.unpack_from(self.buf)
         if magic >> 8 != 0xD1:
             raise WalSyncError(f"bad page magic 0x{magic:04X} at 0x{self.pos:X}")
         if magic not in self.PAGE_MAGICS and not self.warned_magic:
@@ -302,7 +312,7 @@ class XLogWalker:
         if pageaddr != self.pos:
             raise WalSyncError(f"page address 0x{pageaddr:X} does not match stream position 0x{self.pos:X}")
         if size == self.LONG_PHD:
-            _sysid, seg_size, blcksz = struct.unpack_from("<QII", self.buf, 24)
+            _sysid, seg_size, blcksz = self._S_LONG_TAIL.unpack_from(self.buf, 24)
             if blcksz != self.BLCKSZ:
                 raise WalSyncError(f"unsupported WAL block size {blcksz}")
             self.seg_size = seg_size
@@ -319,7 +329,7 @@ class XLogWalker:
 
     def parse_record(self, rec: bytes) -> WalEvent | None:
         """Decode one complete record into an event; None for record types that never nudge."""
-        _tot_len, xid, _prev, info, rmid = struct.unpack_from("<IIQBB", rec)
+        _tot_len, xid, _prev, info, rmid = self._S_REC_HDR.unpack_from(rec)
         op = info & 0x70
         if rmid == self.RM_XACT:
             return self.parse_xact(rec, xid, info, op)
@@ -356,12 +366,12 @@ class XLogWalker:
         subxids: tuple[int, ...] = ()
         if info & self.XACT_HAS_INFO and len(main) >= 12:
             try:
-                (xinfo,) = struct.unpack_from("<I", main, 8)  # follows the 8-byte xact_time
+                (xinfo,) = self._S_XINFO.unpack_from(main, 8)  # follows the 8-byte xact_time
                 offset = 12
                 if xinfo & self.XINFO_HAS_DBINFO:
                     offset += 8
                 if xinfo & self.XINFO_HAS_SUBXACTS:
-                    (count,) = struct.unpack_from("<i", main, offset)
+                    (count,) = self._S_SUBXCNT.unpack_from(main, offset)
                     offset += 4
                     subxids = struct.unpack_from(f"<{count}I", main, offset)
             except struct.error as exc:
