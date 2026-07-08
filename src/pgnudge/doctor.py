@@ -10,22 +10,42 @@ import functools
 import os
 import secrets
 import ssl as ssl_module
+from collections.abc import Coroutine
 from dataclasses import dataclass
+from typing import Protocol, TypeAlias
 
 from pgnudge.proto import PgServerError, WalsenderConnection
 
 __all__ = ["Check", "Diagnosis", "diagnose"]
 
 _MIN_VERSION_NUM = 160000  # PostgreSQL 16.0
+_FALLBACK_PLUGIN = "test_decoding"  # zero-install; WalFeed parses it too
+
+# A detected managed platform, or None for self-managed / undetected. The label
+# shapes remediation text: the SQL that fixes wal_level on a self-hosted box is
+# a parameter-group toggle on RDS and a portal/CLI setting on Azure.
+Platform: TypeAlias = str  # "rds" | "azure" | "gcp"
+
+
+class Connect(Protocol):
+    """The ``connect`` partial each probe calls, varying only ``replication``."""
+
+    def __call__(self, *, replication: str) -> Coroutine[None, None, WalsenderConnection]: ...
 
 
 @dataclass(frozen=True, slots=True)
 class Check:
-    """One readiness check: a name, pass/fail, and a human-readable detail."""
+    """One readiness check: a name, pass/fail, detail, and an optional fix.
+
+    ``fix`` is a copy-paste remediation shown under a failed check; it is None
+    when the check passed or when nothing actionable applies (e.g. an old
+    server version, which no SQL can fix).
+    """
 
     name: str
     ok: bool
     detail: str
+    fix: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +74,90 @@ async def _scalar(conn: WalsenderConnection, sql: str) -> str | None:
     return rows[0][0]
 
 
+async def _detect_platform(conn: WalsenderConnection) -> Platform | None:
+    """Best-effort managed-platform fingerprint from GUCs and vendor roles.
+
+    All probes are missing-safe (``current_setting(..., true)`` and role
+    existence), so an unknown platform simply returns None.
+    """
+    rows = await conn.simple_query_rows(
+        "SELECT current_setting('rds.extensions', true) IS NOT NULL, "
+        "EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'azure_pg_admin'), "
+        "EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'cloudsqlsuperuser')"
+    )
+    if not rows or len(rows[0]) < 3:
+        return None
+    is_rds, is_azure, is_gcp = (value == "t" for value in rows[0][:3])
+    if is_rds:
+        return "rds"
+    if is_azure:
+        return "azure"
+    if is_gcp:
+        return "gcp"
+    return None
+
+
+def _platform_label(platform: Platform | None) -> str:
+    return {"rds": "Amazon RDS / Aurora", "azure": "Azure Flexible Server", "gcp": "Google Cloud SQL"}.get(
+        platform or "", "self-managed / undetected"
+    )
+
+
+def _wal_level_fix(platform: Platform | None) -> str:
+    if platform == "rds":
+        return "set rds.logical_replication=1 in the DB parameter group, then reboot the instance"
+    if platform == "azure":
+        return (
+            "set server parameter wal_level=logical "
+            "(az postgres flexible-server parameter set --name wal_level --value logical), then restart"
+        )
+    if platform == "gcp":
+        return "set the cloudsql.logical_decoding flag to on, then restart the instance"
+    return "ALTER SYSTEM SET wal_level = 'logical';  -- then restart PostgreSQL"
+
+
+def _replication_role_fix(platform: Platform | None, user: str) -> str:
+    if platform == "rds":
+        return f'GRANT rds_replication TO "{user}";'
+    if platform == "azure":
+        return f'ALTER ROLE "{user}" WITH REPLICATION;  -- run as azure_pg_admin'
+    return f'ALTER ROLE "{user}" WITH REPLICATION;  -- superuser required'
+
+
+def _physical_fix(platform: Platform | None) -> str:
+    if platform == "rds":
+        return "RDS / Aurora blocks external physical streaming; use WalFeed (logical) instead"
+    if platform in ("azure", "gcp"):
+        return "managed platforms usually block external physical streaming; use WalFeed (logical) instead"
+    return (
+        'add "host replication <user> <client-ip>/32 <method>" to pg_hba.conf (then reload), '
+        "and grant the role REPLICATION"
+    )
+
+
+def _wal2json_fix() -> str:
+    return (
+        "install wal2json on the server (e.g. apt-get install postgresql-<ver>-wal2json), "
+        f"or run pgnudge with --plugin {_FALLBACK_PLUGIN}"
+    )
+
+
+async def _probe_logical(connect: Connect, plugin: str) -> Exception | None:
+    """Create and drop a TEMPORARY logical slot; return the failure, or None."""
+    try:
+        conn = await connect(replication="database")
+        try:
+            slot = f"pgnudge_doctor_{os.getpid()}_{secrets.token_hex(3)}"
+            await conn.simple_query(
+                f'CREATE_REPLICATION_SLOT "{slot}" TEMPORARY LOGICAL {plugin} (SNAPSHOT \'nothing\')'
+            )
+            return None
+        finally:
+            conn.abort()
+    except Exception as exc:
+        return exc
+
+
 async def _connect(
     *,
     host: str,
@@ -78,6 +182,72 @@ async def _connect(
     )
 
 
+def _version_check(version: str | None) -> Check:
+    version_num = int(version) if version and version.isdigit() else 0
+    if version_num >= _MIN_VERSION_NUM:
+        return Check("server version", True, f"PostgreSQL server_version_num={version_num}")
+    return Check(
+        "server version",
+        False,
+        f"server_version_num={version or '?'}; pgnudge needs PostgreSQL 16+",
+        fix="upgrade the server to PostgreSQL 16 or newer",
+    )
+
+
+def _role_check(privileged: str | None, platform: Platform | None, user: str) -> Check:
+    if privileged == "t":
+        return Check("REPLICATION role", True, f"role {user!r} has REPLICATION (or is superuser)")
+    return Check(
+        "REPLICATION role",
+        False,
+        f"role {user!r} lacks REPLICATION; grant it or use a dedicated role",
+        fix=_replication_role_fix(platform, user),
+    )
+
+
+async def _walfeed_check(connect: Connect, plugin: str, wal_level: str | None, platform: Platform | None) -> Check:
+    """Probe WalFeed readiness with a throwaway TEMPORARY logical slot.
+
+    A slot exercises wal_level, the plugin, and the REPLICATION grant at once,
+    and dies with the connection. When ``plugin`` is missing (58P01) we retry
+    with the built-in ``test_decoding`` so we can tell "logical decoding is
+    blocked" apart from "logical works, wal2json just is not installed".
+    """
+    exc = await _probe_logical(connect, plugin)
+    if exc is None:
+        return Check("WalFeed (logical decoding)", True, f"temporary {plugin} slot created (and dropped)")
+
+    plugin_missing = isinstance(exc, PgServerError) and exc.fields.get("C") == "58P01"
+    if plugin_missing and plugin != _FALLBACK_PLUGIN and await _probe_logical(connect, _FALLBACK_PLUGIN) is None:
+        return Check(
+            "WalFeed (logical decoding)",
+            True,
+            f"{plugin} not installed, but logical decoding works via the {_FALLBACK_PLUGIN} fallback",
+        )
+
+    detail = _explain(exc)
+    if plugin_missing:
+        return Check("WalFeed (logical decoding)", False, detail, fix=_wal2json_fix())
+    if wal_level and wal_level != "logical":
+        detail = f"{detail} (wal_level={wal_level})"
+    return Check("WalFeed (logical decoding)", False, detail, fix=_wal_level_fix(platform))
+
+
+async def _physical_check(connect: Connect, platform: Platform | None) -> Check:
+    """Probe RawFeed readiness with IDENTIFY_SYSTEM; creates no server object."""
+    try:
+        conn = await connect(replication="true")
+        try:
+            rows = await conn.simple_query_rows("IDENTIFY_SYSTEM")
+        finally:
+            conn.abort()
+    except Exception as exc:
+        return Check("RawFeed (physical WAL)", False, _explain(exc), fix=_physical_fix(platform))
+    if rows and rows[0]:
+        return Check("RawFeed (physical WAL)", True, "IDENTIFY_SYSTEM ok; physical streaming permitted")
+    return Check("RawFeed (physical WAL)", False, "IDENTIFY_SYSTEM returned no row", fix=_physical_fix(platform))
+
+
 async def diagnose(
     *,
     host: str,
@@ -90,7 +260,6 @@ async def diagnose(
     connect_timeout: float = 10.0,
 ) -> Diagnosis:
     """Probe ``host:port`` and return readiness checks plus a recommendation."""
-    checks: list[Check] = []
     connect = functools.partial(
         _connect,
         host=host,
@@ -102,70 +271,30 @@ async def diagnose(
         connect_timeout=connect_timeout,
     )
 
-    # -- basics: a plain connection needs no REPLICATION attribute, so a
-    # missing grant still yields a clean version/wal_level report --
+    # A plain connection needs no REPLICATION attribute, so a missing grant
+    # still yields a clean version / wal_level / platform report.
     try:
         basic = await connect(replication="false")
     except Exception as exc:
-        checks.append(Check("connect", False, f"cannot connect to {host}:{port}: {_explain(exc)}"))
-        return Diagnosis(tuple(checks), None)
+        return Diagnosis((Check("connect", False, f"cannot connect to {host}:{port}: {_explain(exc)}"),), None)
 
-    wal_level: str | None = None
     try:
-        checks.append(Check("connect", True, f"connected to {host}:{port} (backend pid {basic.backend_pid})"))
+        backend_pid = basic.backend_pid
         version = await _scalar(basic, "SHOW server_version_num")
-        version_num = int(version) if version and version.isdigit() else 0
-        if version_num >= _MIN_VERSION_NUM:
-            checks.append(Check("server version", True, f"PostgreSQL server_version_num={version_num}"))
-        else:
-            checks.append(
-                Check("server version", False, f"server_version_num={version or '?'}; pgnudge needs PostgreSQL 16+")
-            )
         wal_level = await _scalar(basic, "SHOW wal_level")
         privileged = await _scalar(basic, "SELECT rolsuper OR rolreplication FROM pg_roles WHERE rolname = current_user")
-        if privileged == "t":
-            checks.append(Check("REPLICATION role", True, f"role {user!r} has REPLICATION (or is superuser)"))
-        else:
-            checks.append(
-                Check("REPLICATION role", False, f"role {user!r} lacks REPLICATION; grant it or use a dedicated role")
-            )
+        platform = await _detect_platform(basic)
     finally:
         basic.abort()
 
-    # -- WalFeed probe: a TEMPORARY logical slot proves wal_level=logical,
-    # the plugin, and REPLICATION all at once; it dies with this connection --
-    logical_ok = False
-    try:
-        conn = await connect(replication="database")
-        try:
-            slot = f"pgnudge_doctor_{os.getpid()}_{secrets.token_hex(3)}"
-            await conn.simple_query(
-                f'CREATE_REPLICATION_SLOT "{slot}" TEMPORARY LOGICAL {plugin} (SNAPSHOT \'nothing\')'
-            )
-            logical_ok = True
-            checks.append(Check("WalFeed (logical decoding)", True, f"temporary {plugin} slot created (and dropped)"))
-        finally:
-            conn.abort()
-    except Exception as exc:
-        hint = f" (wal_level={wal_level})" if wal_level and wal_level != "logical" else ""
-        checks.append(Check("WalFeed (logical decoding)", False, f"{_explain(exc)}{hint}"))
-
-    # -- RawFeed probe: physical streaming proves REPLICATION and a pg_hba
-    # replication entry; no server object is created --
-    physical_ok = False
-    try:
-        conn = await connect(replication="true")
-        try:
-            rows = await conn.simple_query_rows("IDENTIFY_SYSTEM")
-            if rows and rows[0]:
-                physical_ok = True
-                checks.append(Check("RawFeed (physical WAL)", True, "IDENTIFY_SYSTEM ok; physical streaming permitted"))
-            else:
-                checks.append(Check("RawFeed (physical WAL)", False, "IDENTIFY_SYSTEM returned no row"))
-        finally:
-            conn.abort()
-    except Exception as exc:
-        checks.append(Check("RawFeed (physical WAL)", False, _explain(exc)))
-
-    recommended = "WalFeed" if logical_ok else "RawFeed" if physical_ok else None
+    checks = [
+        Check("connect", True, f"connected to {host}:{port} (backend pid {backend_pid})"),
+        Check("platform", True, f"detected {_platform_label(platform)}"),
+        _version_check(version),
+        _role_check(privileged, platform, user),
+        await _walfeed_check(connect, plugin, wal_level, platform),
+        await _physical_check(connect, platform),
+    ]
+    walfeed, physical = checks[-2], checks[-1]
+    recommended = "WalFeed" if walfeed.ok else "RawFeed" if physical.ok else None
     return Diagnosis(tuple(checks), recommended)

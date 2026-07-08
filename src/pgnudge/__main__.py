@@ -155,6 +155,8 @@ async def _run_doctor(args: argparse.Namespace) -> bool:
     )
     for check in diag.checks:
         print(f"[{'ok' if check.ok else 'FAIL'}] {check.name}: {check.detail}", flush=True)
+        if not check.ok and check.fix is not None:
+            print(f"       fix: {check.fix}", flush=True)
     if diag.recommended is not None:
         print(f"\nrecommended transport: {diag.recommended}", flush=True)
     else:

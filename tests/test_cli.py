@@ -159,7 +159,10 @@ def test_doctor_plugin_is_selectable() -> None:
 def _fake_diagnose(recommended: str | None) -> object:
     async def diagnose(**kwargs: object) -> Diagnosis:
         return Diagnosis(
-            checks=(Check("connect", True, "connected"), Check("WalFeed (logical decoding)", recommended is not None, "x")),
+            checks=(
+                Check("connect", True, "connected"),
+                Check("WalFeed (logical decoding)", recommended is not None, "x", fix="run the magic command"),
+            ),
             recommended=recommended,
         )
 
@@ -176,6 +179,7 @@ async def test_run_doctor_prints_checks_and_recommendation(
     out = capsys.readouterr().out
     assert "[ok] connect: connected" in out
     assert "recommended transport: WalFeed" in out
+    assert "fix:" not in out  # a passing check never prints its fix
 
 
 async def test_run_doctor_reports_no_transport(
@@ -187,6 +191,7 @@ async def test_run_doctor_reports_no_transport(
     assert not ok
     out = capsys.readouterr().out
     assert "[FAIL] WalFeed (logical decoding)" in out
+    assert "fix: run the magic command" in out  # a failed check surfaces its remediation
     assert "no transport available" in out
 
 
