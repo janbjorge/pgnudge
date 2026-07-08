@@ -256,9 +256,10 @@ the byte layouts and parser structures behind both transports are in
 Short version: each platform below documents a `WalFeed` path - flip
 `wal_level = logical` and grant a REPLICATION-capable role. Whether `RawFeed`
 works (it needs external `START_REPLICATION PHYSICAL` to a non-managed standby)
-is **untested** on all of them, and mostly undocumented; pgnudge makes no claim
-either way. If you confirm it works, or that a platform blocks it, open an issue
-and this table gets updated.
+is **untested** on most of them, and mostly undocumented; pgnudge makes no claim
+either way. The one confirmed data point is **Azure Flexible Server, which
+blocks it** (see below). If you confirm it works, or that a platform blocks it,
+open an issue and this table gets updated.
 
 The `WalFeed` column reflects each vendor's own documentation (linked below).
 pgnudge has **not** been integration-tested against any of these services;
@@ -270,7 +271,7 @@ handshake.
 | AWS RDS PostgreSQL      | yes                    | untested  | `rds.logical_replication=1`, grant `rds_replication`         |
 | AWS Aurora PostgreSQL   | yes                    | untested  | `rds.logical_replication=1` (cluster parameter group)        |
 | Google Cloud SQL        | yes                    | untested  | flag `cloudsql.logical_decoding=on`, user `WITH REPLICATION` |
-| Azure Flexible Server   | yes                    | untested  | `wal_level=logical`, `ALTER ROLE ... WITH REPLICATION`       |
+| Azure Flexible Server   | yes                    | **no**    | `wal_level=logical`, `ALTER ROLE ... WITH REPLICATION`       |
 | Supabase                | yes\*                  | untested  | role `WITH REPLICATION`; **direct** connection only          |
 | Neon                    | yes\*                  | untested  | enabling logical repl flips `wal_level` project-wide         |
 
@@ -285,6 +286,11 @@ Caveats worth a pre-flight `pgnudge doctor`:
 - **RDS / Aurora:** `rds_replication` grants logical-slot access but does not
   carry the raw `REPLICATION` role attribute; confirm the temporary-slot
   `START_REPLICATION` path.
+- **Azure Flexible Server:** external `START_REPLICATION PHYSICAL` is blocked
+  (`28000: no pg_hba.conf entry for replication connection`), confirmed live
+  via `pgnudge doctor`. `RawFeed` is unavailable; use `WalFeed`. Enabling
+  `wal_level=logical` needs a server restart, and the login role needs the
+  `REPLICATION` attribute (grant it as `azure_pg_admin`).
 - **Neon:** enabling logical replication changes `wal_level` for the whole
   project and cannot be undone.
 - **Output plugin:** `wal2json` is common but not universal; `test_decoding`
