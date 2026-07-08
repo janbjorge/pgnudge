@@ -56,6 +56,7 @@ def test_bench_physical_walker(benchmark: BenchmarkFixture) -> None:
         ("wal2json_v2", b'{"action":"U","schema":"public","table":"stations","columns":[]}'),
         ("test_decoding", b"table public.stations: UPDATE: id[integer]:1 name[text]:'st-1'"),
     ],
+    ids=["wal2json_v2", "test_decoding"],
 )
 def test_bench_logical_parser(benchmark: BenchmarkFixture, name: str, payload: bytes) -> None:
     """The two payload->tables parsers, per-message rather than per-byte."""
