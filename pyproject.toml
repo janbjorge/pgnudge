@@ -1,10 +1,10 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
 name = "pgnudge"
-version = "1.0.0"
+dynamic = ["version"]
 description = "Push-only change nudges from PostgreSQL logical replication: the database nudges, consumers refetch."
 readme = "README.md"
 license = { text = "MIT" }
@@ -41,6 +41,11 @@ dev = [
   "testcontainers>=4",
   "pytest-cov>=7.1.0",
 ]
+
+# version is derived from the git tag at build time (hatch-vcs); the release
+# tag is the single source of truth, so there is no version to bump by hand
+[tool.hatch.version]
+source = "vcs"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pgnudge"]
