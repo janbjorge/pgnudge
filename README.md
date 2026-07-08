@@ -89,7 +89,11 @@ server setting, `wal_level`.
 - **You are stuck at the stock `wal_level = replica`** -> use `RawFeed`. No
   server change at all: it decodes physical WAL client-side. The trade: no
   `TRUNCATE` detection, and the server streams the whole cluster's WAL for
-  pgnudge to filter locally.
+  pgnudge to filter locally. `RawFeed` is best treated as a
+  **self-hosted / VM-Postgres** transport: it needs external physical WAL
+  streaming, which managed platforms are not known to expose (untested; see
+  [Managed platforms](#managed-platforms)). On a managed service, flip
+  `wal_level = logical` and use `WalFeed`.
 
 If you get to choose, choose `WalFeed`. Neither is more "correct"; they are the
 same contract over two different server capabilities.
@@ -209,8 +213,11 @@ allows.
 | `TRUNCATE` nudges | yes                                | no (documented gap)                      |
 | Stream scope      | one database, filtered server-side | whole cluster, filtered client-side      |
 
-`RawFeed` exists for servers where `wal_level=logical` is not on the table:
-managed defaults, change-averse ops, no restart window. It streams raw physical
+`RawFeed` exists for **self-hosted** servers where `wal_level=logical` is not on
+the table: change-averse ops, no restart window, or a policy against logical
+decoding. It needs external physical WAL streaming, which managed platforms are
+not known to expose (untested; see [Managed platforms](#managed-platforms)), so
+on a managed service you use `WalFeed`. It streams raw physical
 WAL **slot-less** and parses record headers client-side, just enough to answer
 *which relation changed*, never row contents. Nudges are commit-gated: a change
 is delivered only after its transaction's commit record, so rollbacks never
@@ -237,6 +244,61 @@ the role, because physical replication matches the `replication`
 pseudo-database, not `all`. Mechanics in [docs/physical-wal.md](docs/physical-wal.md);
 the byte layouts and parser structures behind both transports are in
 [docs/parsing.md](docs/parsing.md).
+
+## Managed platforms
+
+Short version: each platform below documents a `WalFeed` path - flip
+`wal_level = logical` and grant a REPLICATION-capable role. Whether `RawFeed`
+works (it needs external `START_REPLICATION PHYSICAL` to a non-managed standby)
+is **untested** on all of them, and mostly undocumented; pgnudge makes no claim
+either way. If you confirm it works, or that a platform blocks it, open an issue
+and this table gets updated.
+
+The `WalFeed` column reflects each vendor's own documentation (linked below).
+pgnudge has **not** been integration-tested against any of these services;
+verify against your plan and region, and let `pgnudge doctor` confirm the live
+handshake.
+
+| Platform                | `WalFeed` (documented) | `RawFeed` | Enable `wal_level = logical`                                  |
+|-------------------------|------------------------|-----------|--------------------------------------------------------------|
+| AWS RDS PostgreSQL      | yes                    | untested  | `rds.logical_replication=1`, grant `rds_replication`         |
+| AWS Aurora PostgreSQL   | yes                    | untested  | `rds.logical_replication=1` (cluster parameter group)        |
+| Google Cloud SQL        | yes                    | untested  | flag `cloudsql.logical_decoding=on`, user `WITH REPLICATION` |
+| Azure Flexible Server   | yes                    | untested  | `wal_level=logical`, `ALTER ROLE ... WITH REPLICATION`       |
+| Supabase                | yes\*                  | untested  | role `WITH REPLICATION`; **direct** connection only          |
+| Neon                    | yes\*                  | untested  | enabling logical repl flips `wal_level` project-wide         |
+
+`\*` Supabase and Neon require a **direct** connection, not their pooler
+(Supavisor / PgBouncer) - the same rule pgnudge already states for any pooler.
+The `RawFeed` column is left **untested**: these vendors document logical
+decoding as the external replication path and do not document an external
+physical-streaming endpoint, but we have neither confirmed nor ruled one out.
+Reports welcome.
+
+Caveats worth a pre-flight `pgnudge doctor`:
+- **RDS / Aurora:** `rds_replication` grants logical-slot access but does not
+  carry the raw `REPLICATION` role attribute; confirm the temporary-slot
+  `START_REPLICATION` path.
+- **Neon:** enabling logical replication changes `wal_level` for the whole
+  project and cannot be undone.
+- **Output plugin:** `wal2json` is common but not universal; `test_decoding`
+  ships with core PostgreSQL and is the zero-install fallback.
+
+Sources (vendor docs): [RDS logical replication][rds-lr], [RDS/Aurora to
+self-managed][rds-selfmanaged], [Aurora logical replication][aurora-lr],
+[Cloud SQL logical replication][gcp-lr], [Cloud SQL external server][gcp-ext],
+[Azure logical][azure-lr], [Supabase external replication][supa-lr],
+[Neon logical replication][neon-lr], [Neon connection pooling][neon-pool].
+
+[rds-lr]: https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/PostgreSQL.Concepts.General.FeatureSupport.LogicalReplication.html
+[rds-selfmanaged]: https://aws.amazon.com/blogs/database/using-logical-replication-to-replicate-managed-amazon-rds-for-postgresql-and-amazon-aurora-to-self-managed-postgresql/
+[aurora-lr]: https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/AuroraPostgreSQL.Replication.Logical.Configure.html
+[gcp-lr]: https://docs.cloud.google.com/sql/docs/postgres/replication/configure-logical-replication
+[gcp-ext]: https://docs.cloud.google.com/sql/docs/postgres/replication/external-server
+[azure-lr]: https://learn.microsoft.com/en-us/azure/postgresql/flexible-server/concepts-logical
+[supa-lr]: https://supabase.com/docs/guides/database/postgres/setup-replication-external
+[neon-lr]: https://neon.com/docs/guides/logical-replication-neon
+[neon-pool]: https://neon.com/docs/connect/connection-pooling
 
 ## Why not LISTEN/NOTIFY?
 
@@ -270,15 +332,18 @@ with the bridge.
   nothing (that's the point), which also means an idle feed never retains WAL.
 - Managed platforms: enabling `wal_level=logical` typically requires a restart
   (once); grant `REPLICATION` to a dedicated role rather than widening an app
-  role, since logical decoding sees the whole database's stream. If that restart
-  is off the table, `RawFeed` runs at the stock `wal_level=replica`.
+  role, since logical decoding sees the whole database's stream. On managed
+  services, plan on that restart: whether `RawFeed` can serve as a no-restart
+  alternative there is untested (external physical streaming is not known to be
+  exposed; see [Managed platforms](#managed-platforms)).
 - A role with `REPLICATION` sees every table's changes through either transport
   regardless of its SELECT grants; table grants do not scope a change feed.
   Scope with `tables=` and treat the role as privileged.
 - Physical replication (`RawFeed`) needs a `pg_hba.conf` entry for the
   `replication` pseudo-database (`host replication <role> ...`); the usual
-  `host all` rules do not match it. Managed platforms generally handle this once
-  the role has `REPLICATION`.
+  `host all` rules do not match it. This is a self-hosted concern; whether
+  managed platforms expose external physical streaming at all is untested (see
+  [Managed platforms](#managed-platforms)).
 - Thundering herd: a database restart reconnects every feed at once, and every
   consumer's `Resync` handler refetches at once. Reconnect timing is already
   jittered, but the refetch is your code. Add jitter there when many consumers
