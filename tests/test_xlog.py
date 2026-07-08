@@ -392,6 +392,13 @@ def test_bad_magic_family_raises() -> None:
         walk(s)
 
 
+def test_byte_swapped_magic_names_big_endian() -> None:
+    s = WalStream(start_lsn(), magic=(MAGIC & 0xFF) << 8 | MAGIC >> 8)  # 0xD116 -> 0x16D1
+    s.add(heap_insert())
+    with pytest.raises(WalSyncError, match="big-endian"):
+        walk(s)
+
+
 def test_pageaddr_mismatch_raises() -> None:
     s = WalStream(start_lsn())
     s.add(heap_insert())

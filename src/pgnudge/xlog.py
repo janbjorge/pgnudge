@@ -305,6 +305,14 @@ class XLogWalker:
             return False
         magic, info, _tli, pageaddr, rem_len = self._S_PAGE_HDR.unpack_from(self.buf)
         if magic >> 8 != 0xD1:
+            # a big-endian server stores xlp_magic byte-swapped; the walker reads
+            # little-endian only, so name the architecture instead of the garbled magic
+            swapped = (magic & 0xFF) << 8 | magic >> 8
+            if swapped >> 8 == 0xD1:
+                raise WalSyncError(
+                    f"WAL page magic 0x{swapped:04X} is byte-swapped: this is a "
+                    "big-endian PostgreSQL server, which pgnudge does not support"
+                )
             raise WalSyncError(f"bad page magic 0x{magic:04X} at 0x{self.pos:X}")
         if magic not in self.PAGE_MAGICS and not self.warned_magic:
             self.warned_magic = True
