@@ -29,6 +29,18 @@ jobs:
       # build ONCE: hatch-vcs stamps the version from the tag; this exact
       # artifact is what gets tested and published
       - run: uv build
+      # hatch-vcs derives the version via `git describe`, which can resolve to a
+      # tag OTHER than the one that triggered this run (e.g. two tags on one
+      # commit). Refuse to publish unless the built artifact's version is
+      # exactly the release tag, so a mismatch fails here instead of shipping
+      # the wrong version.
+      - run: |
+          expected="${GITHUB_REF_NAME#v}"
+          if [ ! -f "dist/pgnudge-${expected}-py3-none-any.whl" ]; then
+            echo "::error::built version does not match tag ${GITHUB_REF_NAME}; dist contains:"
+            ls -1 dist
+            exit 1
+          fi
       # metadata + README render check before it can reach PyPI
       - run: uvx twine check dist/*
       # the zero-footprint proof is the product: run the live suite from the
