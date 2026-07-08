@@ -40,7 +40,9 @@ class RelResolver:
     SYSTEM_SCHEMAS: ClassVar[frozenset[str]] = frozenset({"pg_catalog", "pg_toast", "information_schema"})
 
     async def prime(self) -> None:
-        rows = await self.conn.simple_query_rows("SELECT oid FROM pg_database WHERE datname = current_database()")
+        rows = await self.conn.simple_query_rows(
+            "SELECT oid FROM pg_database WHERE datname = current_database()"
+        )
         if not rows or rows[0][0] is None:
             raise ConnectionError("could not determine the current database oid")
         self.db_oid = int(rows[0][0])
@@ -160,72 +162,77 @@ class RawFeed(BaseFeed):
                 await self._reconnect_pause(attempt)
                 continue
 
-            self.stream_conn = stream
-            self.connection_pid = stream.backend_pid
-            try:
-                catalog = await self.connect_once("database")
-                self.catalog_conn = catalog
-                resolver = RelResolver(conn=catalog)
-                await resolver.prime()
+            # Nested async with drives abort() for both sockets on every exit
+            # path (WalsenderConnection.__aexit__); the finally only resets state.
+            async with stream:
+                self.stream_conn = stream
+                self.connection_pid = stream.backend_pid
+                try:
+                    catalog = await self.connect_once("database")
+                    async with catalog:
+                        self.catalog_conn = catalog
+                        resolver = RelResolver(conn=catalog)
+                        await resolver.prime()
 
-                rows = await stream.simple_query_rows("IDENTIFY_SYSTEM")
-                if not rows or rows[0][1] is None or rows[0][2] is None:
-                    raise ConnectionError("IDENTIFY_SYSTEM returned no position")
-                timeline = int(rows[0][1])
-                flush_lsn = parse_lsn(rows[0][2])
-                # from-connect-only watermark is the *insert* position: with
-                # asynchronous commit, pre-connect writes may not be flushed
-                # yet and would otherwise stream in as news
-                inserted = await catalog.simple_query_rows("SELECT pg_current_wal_insert_lsn()")
-                if not inserted or inserted[0][0] is None:
-                    raise ConnectionError("could not determine the WAL insert position")
-                insert_lsn = parse_lsn(inserted[0][0])
-                # page-align down; the first page's rem_len resynchronizes the walker
-                start = XLogWalker.page_floor(flush_lsn)
-                await stream.start_replication(
-                    f"START_REPLICATION PHYSICAL {format_lsn(start)} TIMELINE {timeline}"
-                )
-                attempt = 0
-                self._emit_resync("connected" if first else "reconnected")
-                self.log.info(
-                    "streaming physical WAL from %s timeline %d (backend pid %s)",
-                    format_lsn(start),
-                    timeline,
-                    stream.backend_pid,
-                )
-                first = False
+                        rows = await stream.simple_query_rows("IDENTIFY_SYSTEM")
+                        if not rows or rows[0][1] is None or rows[0][2] is None:
+                            raise ConnectionError("IDENTIFY_SYSTEM returned no position")
+                        timeline = int(rows[0][1])
+                        flush_lsn = parse_lsn(rows[0][2])
+                        # from-connect-only watermark is the *insert* position: with
+                        # asynchronous commit, pre-connect writes may not be flushed
+                        # yet and would otherwise stream in as news
+                        inserted = await catalog.simple_query_rows("SELECT pg_current_wal_insert_lsn()")
+                        if not inserted or inserted[0][0] is None:
+                            raise ConnectionError("could not determine the WAL insert position")
+                        insert_lsn = parse_lsn(inserted[0][0])
+                        # page-align down; the first page's rem_len resynchronizes the walker
+                        start = XLogWalker.page_floor(flush_lsn)
+                        await stream.start_replication(
+                            f"START_REPLICATION PHYSICAL {format_lsn(start)} TIMELINE {timeline}"
+                        )
+                        attempt = 0
+                        self._emit_resync("connected" if first else "reconnected")
+                        self.log.info(
+                            "streaming physical WAL from %s timeline %d (backend pid %s)",
+                            format_lsn(start),
+                            timeline,
+                            stream.backend_pid,
+                        )
+                        first = False
 
-                walker = XLogWalker(start_lsn=start, emit_from=insert_lsn)
-                gate = CommitGate()
-                self.last_lsn = flush_lsn
-                self.last_inbound = time.monotonic()
-                async with self._feedback_running(stream):
-                    while True:
-                        msg = await stream.read_stream()
+                        walker = XLogWalker(start_lsn=start, emit_from=insert_lsn)
+                        gate = CommitGate()
+                        self.last_lsn = flush_lsn
                         self.last_inbound = time.monotonic()
-                        self.last_lsn = max(self.last_lsn, msg.end_lsn)
-                        if isinstance(msg, XLogData):
-                            expected = walker.pos + len(walker.buf)
-                            if msg.start_lsn != expected:
-                                raise WalSyncError(
-                                    f"stream position {format_lsn(msg.start_lsn)}"
-                                    f" does not follow {format_lsn(expected)}"
-                                )
-                            events = walker.feed(msg.payload)
-                            released = gate.push(events)
-                            trace_frame(self.log, msg, "events=%s released=%s", events, released)
-                            if released:
-                                await self.push_committed(released, resolver)
-                        elif msg.reply_requested:
-                            await stream.send_standby_status(self.last_lsn)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                # fall through to reconnect from the new flush position
-                self.log.warning("stream error, reconnecting: %s", exc)
-            finally:
-                self.connection_pid = None
-                self.abort_connections()
+                        async with self._feedback_running(stream):
+                            while True:
+                                msg = await stream.read_stream()
+                                self.last_inbound = time.monotonic()
+                                self.last_lsn = max(self.last_lsn, msg.end_lsn)
+                                if isinstance(msg, XLogData):
+                                    expected = walker.pos + len(walker.buf)
+                                    if msg.start_lsn != expected:
+                                        raise WalSyncError(
+                                            f"stream position {format_lsn(msg.start_lsn)}"
+                                            f" does not follow {format_lsn(expected)}"
+                                        )
+                                    events = walker.feed(msg.payload)
+                                    released = gate.push(events)
+                                    trace_frame(self.log, msg, "events=%s released=%s", events, released)
+                                    if released:
+                                        await self.push_committed(released, resolver)
+                                elif msg.reply_requested:
+                                    await stream.send_standby_status(self.last_lsn)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    # fall through to reconnect from the new flush position
+                    self.log.warning("stream error, reconnecting: %s", exc)
+                finally:
+                    self.connection_pid = None
+                    self.stream_conn = None
+                    self.catalog_conn = None
 
             if not self._closing:
                 attempt += 1
