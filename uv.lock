@@ -487,7 +487,6 @@ wheels = [
 
 [[package]]
 name = "pgnudge"
-version = "1.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "scramp" },
