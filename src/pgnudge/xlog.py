@@ -70,6 +70,38 @@ class HeaderWalk:
     main_off: int
 
 
+@dataclass(slots=True)
+class RecordCursor:
+    """Sequential reader over a WAL record; every read advances the position.
+
+    Replaces the manual ``offset += n`` / ``remaining -= n`` pair the header
+    walk used to keep in lockstep: the position lives in one place and
+    ``remaining`` is derived, so the two can never drift. Out-of-bounds reads
+    raise ``IndexError`` / ``struct.error``, which the caller maps to
+    ``WalSyncError``.
+    """
+
+    rec: bytes
+    off: int
+
+    def u8(self) -> int:
+        value = self.rec[self.off]
+        self.off += 1
+        return value
+
+    def unpack(self, fmt: str) -> tuple[int, ...]:
+        values: tuple[int, ...] = struct.unpack_from(fmt, self.rec, self.off)
+        self.off += struct.calcsize(fmt)
+        return values
+
+    def skip(self, n: int) -> None:
+        self.off += n
+
+    @property
+    def remaining(self) -> int:
+        return len(self.rec) - self.off
+
+
 @dataclass(slots=True, kw_only=True)
 class CommitGate:
     """Holds changes per transaction; releases them only at commit.
@@ -139,6 +171,17 @@ class XLogWalker:
     PAGE_MAGICS: ClassVar[frozenset[int]] = frozenset({0xD113, 0xD116, 0xD118})  # PG 16, 17, 18
     XLP_FIRST_IS_CONTRECORD: ClassVar[int] = 0x0001
     XLR_MAX_BLOCK_ID: ClassVar[int] = 32  # block-reference ids 0..32; 252..255 are special markers
+    # Special block-reference ids and fork/image flag bits, named as in the
+    # PostgreSQL source (xlogrecord.h) so a reader can grep the server code.
+    XLR_BLOCK_ID_DATA_SHORT: ClassVar[int] = 255
+    XLR_BLOCK_ID_DATA_LONG: ClassVar[int] = 254
+    XLR_BLOCK_ID_ORIGIN: ClassVar[int] = 253
+    XLR_BLOCK_ID_TOPLEVEL_XID: ClassVar[int] = 252
+    BKPBLOCK_FORK_MASK: ClassVar[int] = 0x0F
+    BKPBLOCK_HAS_IMAGE: ClassVar[int] = 0x10
+    BKPBLOCK_SAME_REL: ClassVar[int] = 0x80
+    BKIMG_HAS_HOLE: ClassVar[int] = 0x01
+    BKIMG_COMPRESS_MASK: ClassVar[int] = 0x1C  # ZLIB | LZ4 | ZSTD bits
 
     RM_XLOG: ClassVar[int] = 0
     RM_XACT: ClassVar[int] = 1
@@ -335,66 +378,49 @@ class XLogWalker:
         offset without ever decoding row contents; the final
         ``remaining != datatotal`` check proves the walk stayed in sync.
         """
-        offset = self.REC_HDR
-        remaining = len(rec) - offset
+        cursor = RecordCursor(rec, self.REC_HDR)
         datatotal = 0
         main_len = 0
         locator: RelFileLocator | None = None
         last: RelFileLocator | None = None
         try:
-            while remaining > datatotal:
-                block_id = rec[offset]
-                offset += 1
-                remaining -= 1
-                if block_id == 255:  # XLR_BLOCK_ID_DATA_SHORT
-                    main_len = rec[offset]
-                    offset += 1
-                    remaining -= 1
+            while cursor.remaining > datatotal:
+                block_id = cursor.u8()
+                if block_id == self.XLR_BLOCK_ID_DATA_SHORT:
+                    main_len = cursor.u8()
                     datatotal += main_len
-                elif block_id == 254:  # XLR_BLOCK_ID_DATA_LONG
-                    (main_len,) = struct.unpack_from("<I", rec, offset)
-                    offset += 4
-                    remaining -= 4
+                elif block_id == self.XLR_BLOCK_ID_DATA_LONG:
+                    (main_len,) = cursor.unpack("<I")
                     datatotal += main_len
-                elif block_id == 253:  # XLR_BLOCK_ID_ORIGIN
-                    offset += 2
-                    remaining -= 2
-                elif block_id == 252:  # XLR_BLOCK_ID_TOPLEVEL_XID
-                    offset += 4
-                    remaining -= 4
+                elif block_id == self.XLR_BLOCK_ID_ORIGIN:
+                    cursor.skip(2)
+                elif block_id == self.XLR_BLOCK_ID_TOPLEVEL_XID:
+                    cursor.skip(4)
                 elif block_id <= self.XLR_MAX_BLOCK_ID:
-                    fork_flags = rec[offset]
-                    (data_len,) = struct.unpack_from("<H", rec, offset + 1)
-                    offset += 3
-                    remaining -= 3
+                    fork_flags = cursor.u8()
+                    (data_len,) = cursor.unpack("<H")
                     datatotal += data_len
-                    if fork_flags & 0x10:  # BKPBLOCK_HAS_IMAGE
-                        (img_len, _hole_offset) = struct.unpack_from("<HH", rec, offset)
-                        bimg_info = rec[offset + 4]
-                        offset += 5
-                        remaining -= 5
-                        if bimg_info & 0x01 and bimg_info & 0x1C:  # hole + compressed
-                            offset += 2  # XLogRecordBlockCompressHeader
-                            remaining -= 2
+                    if fork_flags & self.BKPBLOCK_HAS_IMAGE:
+                        img_len, _hole_offset = cursor.unpack("<HH")
+                        bimg_info = cursor.u8()
+                        if bimg_info & self.BKIMG_HAS_HOLE and bimg_info & self.BKIMG_COMPRESS_MASK:
+                            cursor.skip(2)  # XLogRecordBlockCompressHeader
                         datatotal += img_len
-                    if fork_flags & 0x80:  # BKPBLOCK_SAME_REL
+                    if fork_flags & self.BKPBLOCK_SAME_REL:
                         if last is None:
                             raise WalSyncError("BKPBLOCK_SAME_REL without a prior block")
                         this = last
                     else:
-                        spc_oid, db_oid, relnumber = struct.unpack_from("<III", rec, offset)
-                        offset += 12
-                        remaining -= 12
+                        spc_oid, db_oid, relnumber = cursor.unpack("<III")
                         this = RelFileLocator(spc_oid=spc_oid, db_oid=db_oid, relnumber=relnumber)
-                    offset += 4  # BlockNumber
-                    remaining -= 4
+                    cursor.skip(4)  # BlockNumber
                     last = this
-                    if locator is None and fork_flags & 0x0F == 0:  # main fork only
+                    if locator is None and fork_flags & self.BKPBLOCK_FORK_MASK == 0:  # main fork only
                         locator = this
                 else:
                     raise WalSyncError(f"invalid block reference id {block_id}")
         except (IndexError, struct.error) as exc:
             raise WalSyncError(f"malformed record header: {exc}") from exc
-        if remaining != datatotal:
+        if cursor.remaining != datatotal:
             raise WalSyncError("record header walk overran the data area")
         return HeaderWalk(locator=locator, main_off=len(rec) - main_len)

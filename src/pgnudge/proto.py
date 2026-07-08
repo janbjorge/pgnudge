@@ -56,7 +56,10 @@ class PgServerError(PgnudgeError):
 
     def __init__(self, fields: dict[str, str]) -> None:
         self.fields = fields
-        super().__init__(f"{fields.get('S', 'ERROR')} {fields.get('C', '?????')}: {fields.get('M', 'unknown')}")
+        severity = fields.get("S", "ERROR")
+        code = fields.get("C", "?????")
+        message = fields.get("M", "unknown")
+        super().__init__(f"{severity} {code}: {message}")
 
     @classmethod
     def from_wire(cls, body: bytes) -> Self:
@@ -117,6 +120,20 @@ class WalsenderConnection:
     _PROTOCOL_V3: ClassVar[int] = 196608
     _SSL_REQUEST: ClassVar[int] = 80877103
     _PG_EPOCH_UNIX: ClassVar[int] = 946_684_800  # 2000-01-01 00:00:00 UTC
+
+    # AuthenticationRequest sub-codes, named as in the PostgreSQL source
+    # (protocol.h): the integer that follows the 'R' message type.
+    AUTH_OK: ClassVar[int] = 0
+    AUTH_CLEARTEXT_PASSWORD: ClassVar[int] = 3
+    AUTH_MD5_PASSWORD: ClassVar[int] = 5
+    AUTH_SASL: ClassVar[int] = 10
+    AUTH_SASL_CONTINUE: ClassVar[int] = 11
+    AUTH_SASL_FINAL: ClassVar[int] = 12
+
+    # CopyData replication sub-types: the first payload byte of a 'd' frame.
+    XLOGDATA: ClassVar[bytes] = b"w"
+    KEEPALIVE: ClassVar[bytes] = b"k"
+    STANDBY_STATUS: ClassVar[bytes] = b"r"
 
     def __init__(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, *, tls: bool = False
@@ -212,47 +229,23 @@ class WalsenderConnection:
             msg = await self._read_message()
             if msg.mtype == b"R":
                 (code,) = struct.unpack("!i", msg.body[:4])
-                if code == 0:  # AuthenticationOk
+                if code == self.AUTH_OK:
                     break
-                if code == 3:  # CleartextPassword
-                    if not self.tls:
-                        raise PgServerError.from_message(
-                            "refusing cleartext password on an unencrypted connection; "
-                            "enable ssl= or use SCRAM-SHA-256"
-                        )
-                    if password is None:
-                        raise PgServerError.from_message("server requested a password but none was given")
-                    self._write_message(b"p", password.encode() + b"\x00")
-                    await self._writer.drain()
-                elif code == 5:  # MD5Password
-                    if password is None or user is None:
-                        raise PgServerError.from_message("server requested a password but none was given")
-                    salt = msg.body[4:8]
-                    inner = hashlib.md5(password.encode() + user.encode()).hexdigest()  # noqa: S324
-                    token = "md5" + hashlib.md5(inner.encode() + salt).hexdigest()  # noqa: S324
-                    self._write_message(b"p", token.encode() + b"\x00")
-                    await self._writer.drain()
-                elif code == 10:  # SASL
-                    mechanisms = [m.decode() for m in msg.body[4:].split(b"\x00") if m]
-                    plain = [m for m in mechanisms if not m.endswith("-PLUS")]
-                    if not plain or password is None:
-                        raise PgServerError.from_message(f"unsupported SASL mechanisms {mechanisms} or missing password")
-                    scram = ScramClient(plain, user, password)
-                    first = scram.get_client_first().encode()
-                    self._write_message(b"p", scram.mechanism_name.encode() + b"\x00" + struct.pack("!i", len(first)) + first)
-                    await self._writer.drain()
-                elif code == 11:  # SASLContinue
-                    if scram is None:
-                        raise PgServerError.from_message("server sent SASLContinue before SASL")
-                    scram.set_server_first(msg.body[4:].decode())
-                    self._write_message(b"p", scram.get_client_final().encode())
-                    await self._writer.drain()
-                elif code == 12:  # SASLFinal
-                    if scram is None:
-                        raise PgServerError.from_message("server sent SASLFinal before SASL")
-                    scram.set_server_final(msg.body[4:].decode())
+                if code == self.AUTH_CLEARTEXT_PASSWORD:
+                    await self._send_cleartext_password(password)
+                elif code == self.AUTH_MD5_PASSWORD:
+                    await self._send_md5_password(msg.body, user, password)
+                elif code == self.AUTH_SASL:
+                    scram = await self._begin_sasl(msg.body, user, password)
+                elif code == self.AUTH_SASL_CONTINUE:
+                    await self._continue_sasl(scram, msg.body)
+                elif code == self.AUTH_SASL_FINAL:
+                    self._finish_sasl(scram, msg.body)
                 else:
-                    raise PgServerError.from_message(f"unsupported authentication request (code {code}); pgnudge speaks trust, cleartext, MD5 and SCRAM-SHA-256")
+                    raise PgServerError.from_message(
+                        f"unsupported authentication request (code {code}); "
+                        "pgnudge speaks trust, cleartext, MD5 and SCRAM-SHA-256"
+                    )
             elif msg.mtype == b"E":
                 raise PgServerError.from_wire(msg.body)
             else:  # NoticeResponse etc.
@@ -266,6 +259,53 @@ class WalsenderConnection:
                 return
             elif msg.mtype == b"E":
                 raise PgServerError.from_wire(msg.body)
+
+    async def _send_cleartext_password(self, password: str | None) -> None:
+        if not self.tls:
+            raise PgServerError.from_message(
+                "refusing cleartext password on an unencrypted connection; "
+                "enable ssl= or use SCRAM-SHA-256"
+            )
+        if password is None:
+            raise PgServerError.from_message("server requested a password but none was given")
+        self._write_message(b"p", password.encode() + b"\x00")
+        await self._writer.drain()
+
+    async def _send_md5_password(self, body: bytes, user: str, password: str | None) -> None:
+        if password is None:
+            raise PgServerError.from_message("server requested a password but none was given")
+        salt = body[4:8]
+        inner = hashlib.md5(password.encode() + user.encode()).hexdigest()  # noqa: S324
+        token = "md5" + hashlib.md5(inner.encode() + salt).hexdigest()  # noqa: S324
+        self._write_message(b"p", token.encode() + b"\x00")
+        await self._writer.drain()
+
+    async def _begin_sasl(self, body: bytes, user: str, password: str | None) -> ScramClient:
+        mechanisms = [m.decode() for m in body[4:].split(b"\x00") if m]
+        plain = [m for m in mechanisms if not m.endswith("-PLUS")]  # no channel binding
+        if not plain or password is None:
+            raise PgServerError.from_message(
+                f"unsupported SASL mechanisms {mechanisms} or missing password"
+            )
+        scram = ScramClient(plain, user, password)
+        first = scram.get_client_first().encode()
+        self._write_message(
+            b"p", scram.mechanism_name.encode() + b"\x00" + struct.pack("!i", len(first)) + first
+        )
+        await self._writer.drain()
+        return scram
+
+    async def _continue_sasl(self, scram: ScramClient | None, body: bytes) -> None:
+        if scram is None:
+            raise PgServerError.from_message("server sent SASLContinue before SASL")
+        scram.set_server_first(body[4:].decode())
+        self._write_message(b"p", scram.get_client_final().encode())
+        await self._writer.drain()
+
+    def _finish_sasl(self, scram: ScramClient | None, body: bytes) -> None:
+        if scram is None:
+            raise PgServerError.from_message("server sent SASLFinal before SASL")
+        scram.set_server_final(body[4:].decode())
 
     # -- framing ---------------------------------------------------------------
 
@@ -332,10 +372,10 @@ class WalsenderConnection:
             msg = await self._read_message()
             if msg.mtype == b"d":
                 kind = msg.body[:1]
-                if kind == b"w":
+                if kind == self.XLOGDATA:
                     start, end, _ts = struct.unpack("!QQQ", msg.body[1:25])
                     return XLogData(start_lsn=start, end_lsn=end, payload=msg.body[25:])
-                if kind == b"k":
+                if kind == self.KEEPALIVE:
                     end, _ts, reply = struct.unpack("!QQB", msg.body[1:18])
                     return Keepalive(end_lsn=end, reply_requested=bool(reply))
                 continue  # unknown CopyData subtype
@@ -350,7 +390,8 @@ class WalsenderConnection:
         # serialized: concurrent drain() on a paused transport trips the
         # single-waiter assert in asyncio's FlowControlMixin
         async with self.send_lock:
-            self._write_message(b"d", b"r" + struct.pack("!QQQQB", lsn, lsn, lsn, ts, int(reply)))
+            body = self.STANDBY_STATUS + struct.pack("!QQQQB", lsn, lsn, lsn, ts, int(reply))
+            self._write_message(b"d", body)
             await self._writer.drain()
 
     # -- teardown ----------------------------------------------------------------

@@ -217,7 +217,11 @@ async def _walfeed_check(
         return Check("WalFeed (logical decoding)", True, f"temporary {plugin} slot created (and dropped)")
 
     plugin_missing = isinstance(exc, PgServerError) and exc.fields.get("C") == "58P01"
-    if plugin_missing and plugin != _FALLBACK_PLUGIN and await _probe_logical(connect, _FALLBACK_PLUGIN) is None:
+    if (
+        plugin_missing
+        and plugin != _FALLBACK_PLUGIN
+        and await _probe_logical(connect, _FALLBACK_PLUGIN) is None
+    ):
         return Check(
             "WalFeed (logical decoding)",
             True,
@@ -232,7 +236,10 @@ async def _walfeed_check(
     # otherwise the remaining cause is the grant.
     if wal_level and wal_level != "logical":
         detail = f"{detail} (wal_level={wal_level})"
-        fix = f"{_wal_level_fix(platform)}; the role also needs REPLICATION ({_replication_role_fix(platform, user)})"
+        fix = (
+            f"{_wal_level_fix(platform)}; the role also needs REPLICATION "
+            f"({_replication_role_fix(platform, user)})"
+        )
         return Check("WalFeed (logical decoding)", False, detail, fix=fix)
     return Check("WalFeed (logical decoding)", False, detail, fix=_replication_role_fix(platform, user))
 
@@ -246,7 +253,9 @@ async def _physical_check(connect: Connect, platform: Platform | None) -> Check:
         return Check("RawFeed (physical WAL)", False, _explain(exc), fix=_physical_fix(platform))
     if rows and rows[0]:
         return Check("RawFeed (physical WAL)", True, "IDENTIFY_SYSTEM ok; physical streaming permitted")
-    return Check("RawFeed (physical WAL)", False, "IDENTIFY_SYSTEM returned no row", fix=_physical_fix(platform))
+    return Check(
+        "RawFeed (physical WAL)", False, "IDENTIFY_SYSTEM returned no row", fix=_physical_fix(platform)
+    )
 
 
 async def diagnose(
@@ -277,13 +286,16 @@ async def diagnose(
     try:
         basic = await connect(replication="false")
     except Exception as exc:
-        return Diagnosis((Check("connect", False, f"cannot connect to {host}:{port}: {_explain(exc)}"),), None)
+        detail = f"cannot connect to {host}:{port}: {_explain(exc)}"
+        return Diagnosis((Check("connect", False, detail),), None)
 
     async with basic:
         backend_pid = basic.backend_pid
         version = await _scalar(basic, "SHOW server_version_num")
         wal_level = await _scalar(basic, "SHOW wal_level")
-        privileged = await _scalar(basic, "SELECT rolsuper OR rolreplication FROM pg_roles WHERE rolname = current_user")
+        privileged = await _scalar(
+            basic, "SELECT rolsuper OR rolreplication FROM pg_roles WHERE rolname = current_user"
+        )
         platform = await _detect_platform(basic)
 
     checks = [
