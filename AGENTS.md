@@ -464,11 +464,14 @@ connect to the direct port); MD5 auth (deliberately absent); pgoutput (see
 the publications warning above); behavior under a long-running write
 transaction at connect (slot creation waits: connect latency, never
 history); PG 18 (in the CI matrix, not yet run; a new WAL page magic will
-warn once and the oracle test will catch real decode drift); whether Azure
-Flexible Server permits external START_REPLICATION PHYSICAL at all
-(the make-or-break question for RawFeed on that platform; ten-minute
-smoke test with psql, see docs/physical-wal.md); big-endian servers
-(unsupported by the walker, deliberately).
+warn once and the oracle test will catch real decode drift); big-endian
+servers (unsupported by the walker, deliberately).
+
+Confirmed live (not in CI): Azure Flexible Server BLOCKS external
+START_REPLICATION PHYSICAL (`28000: no pg_hba.conf entry for replication
+connection`), so RawFeed is not viable there; WalFeed is the only path
+(needs wal_level=logical + a REPLICATION-capable role). Verified 2026-07
+with `pgnudge doctor` against a live PG 17 Flexible Server instance.
 
 ## Backlog, priority order
 

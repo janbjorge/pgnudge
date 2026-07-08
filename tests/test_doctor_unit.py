@@ -215,6 +215,29 @@ async def test_walfeed_falls_back_to_test_decoding_when_wal2json_missing() -> No
 # -- platform-aware fixes -----------------------------------------------------
 
 
+async def test_walfeed_permission_error_suggests_the_grant() -> None:
+    """wal_level is already logical, so a 42501 means the missing REPLICATION grant."""
+    handler = scripted_doctor(logical_error=("42501", "permission denied to start WAL sender"))
+    async with scripted_server(handler) as (host, port):
+        diag = await _diagnose(host, port)
+    walfeed = _check(diag, "WalFeed (logical decoding)")
+    assert not walfeed.ok
+    assert walfeed.fix is not None
+    assert "REPLICATION" in walfeed.fix
+    assert "wal_level" not in walfeed.fix  # nothing wrong with wal_level; only the grant remains
+
+
+async def test_walfeed_wrong_wal_level_names_both_fixes() -> None:
+    """A wrong wal_level masks the grant requirement; name both."""
+    handler = scripted_doctor(wal_level=b"replica", logical_error=("42501", "permission denied to start WAL sender"))
+    async with scripted_server(handler) as (host, port):
+        diag = await _diagnose(host, port)
+    walfeed = _check(diag, "WalFeed (logical decoding)")
+    assert walfeed.fix is not None
+    assert "wal_level" in walfeed.fix
+    assert "REPLICATION" in walfeed.fix  # both blockers surfaced
+
+
 async def test_detects_rds_and_tailors_fixes() -> None:
     handler = scripted_doctor(
         platform=(b"t", b"f", b"f"),

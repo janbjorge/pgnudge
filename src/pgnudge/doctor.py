@@ -202,7 +202,9 @@ def _role_check(privileged: str | None, platform: Platform | None, user: str) ->
     )
 
 
-async def _walfeed_check(connect: Connect, plugin: str, wal_level: str | None, platform: Platform | None) -> Check:
+async def _walfeed_check(
+    connect: Connect, plugin: str, wal_level: str | None, platform: Platform | None, user: str
+) -> Check:
     """Probe WalFeed readiness with a throwaway TEMPORARY logical slot.
 
     A slot exercises wal_level, the plugin, and the REPLICATION grant at once,
@@ -225,9 +227,14 @@ async def _walfeed_check(connect: Connect, plugin: str, wal_level: str | None, p
     detail = _explain(exc)
     if plugin_missing:
         return Check("WalFeed (logical decoding)", False, detail, fix=_wal2json_fix())
+    # A wrong wal_level and a missing REPLICATION grant both surface here (the
+    # grant fails first, as 42501), so when wal_level is wrong name both fixes;
+    # otherwise the remaining cause is the grant.
     if wal_level and wal_level != "logical":
         detail = f"{detail} (wal_level={wal_level})"
-    return Check("WalFeed (logical decoding)", False, detail, fix=_wal_level_fix(platform))
+        fix = f"{_wal_level_fix(platform)}; the role also needs REPLICATION ({_replication_role_fix(platform, user)})"
+        return Check("WalFeed (logical decoding)", False, detail, fix=fix)
+    return Check("WalFeed (logical decoding)", False, detail, fix=_replication_role_fix(platform, user))
 
 
 async def _physical_check(connect: Connect, platform: Platform | None) -> Check:
@@ -284,7 +291,7 @@ async def diagnose(
         Check("platform", True, f"detected {_platform_label(platform)}"),
         _version_check(version),
         _role_check(privileged, platform, user),
-        await _walfeed_check(connect, plugin, wal_level, platform),
+        await _walfeed_check(connect, plugin, wal_level, platform, user),
         await _physical_check(connect, platform),
     ]
     walfeed, physical = checks[-2], checks[-1]
