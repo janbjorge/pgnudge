@@ -145,15 +145,12 @@ def _wal2json_fix() -> str:
 async def _probe_logical(connect: Connect, plugin: str) -> Exception | None:
     """Create and drop a TEMPORARY logical slot; return the failure, or None."""
     try:
-        conn = await connect(replication="database")
-        try:
+        async with await connect(replication="database") as conn:
             slot = f"pgnudge_doctor_{os.getpid()}_{secrets.token_hex(3)}"
             await conn.simple_query(
                 f'CREATE_REPLICATION_SLOT "{slot}" TEMPORARY LOGICAL {plugin} (SNAPSHOT \'nothing\')'
             )
-            return None
-        finally:
-            conn.abort()
+        return None
     except Exception as exc:
         return exc
 
@@ -236,11 +233,8 @@ async def _walfeed_check(connect: Connect, plugin: str, wal_level: str | None, p
 async def _physical_check(connect: Connect, platform: Platform | None) -> Check:
     """Probe RawFeed readiness with IDENTIFY_SYSTEM; creates no server object."""
     try:
-        conn = await connect(replication="true")
-        try:
+        async with await connect(replication="true") as conn:
             rows = await conn.simple_query_rows("IDENTIFY_SYSTEM")
-        finally:
-            conn.abort()
     except Exception as exc:
         return Check("RawFeed (physical WAL)", False, _explain(exc), fix=_physical_fix(platform))
     if rows and rows[0]:
@@ -278,14 +272,12 @@ async def diagnose(
     except Exception as exc:
         return Diagnosis((Check("connect", False, f"cannot connect to {host}:{port}: {_explain(exc)}"),), None)
 
-    try:
+    async with basic:
         backend_pid = basic.backend_pid
         version = await _scalar(basic, "SHOW server_version_num")
         wal_level = await _scalar(basic, "SHOW wal_level")
         privileged = await _scalar(basic, "SELECT rolsuper OR rolreplication FROM pg_roles WHERE rolname = current_user")
         platform = await _detect_platform(basic)
-    finally:
-        basic.abort()
 
     checks = [
         Check("connect", True, f"connected to {host}:{port} (backend pid {backend_pid})"),

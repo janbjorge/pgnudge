@@ -15,6 +15,7 @@ import struct
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from types import TracebackType
 from typing import ClassVar, Self
 
 from scramp import ScramClient
@@ -360,6 +361,19 @@ class WalsenderConnection:
             transport = self._writer.transport
             if isinstance(transport, asyncio.WriteTransport):
                 transport.abort()
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        # Same hard close on the normal and the error path: cleanup is the
+        # server's job either way (see abort's docstring). Never suppresses.
+        self.abort()
 
 
 @dataclass(slots=True, kw_only=True)

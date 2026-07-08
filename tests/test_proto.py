@@ -510,6 +510,36 @@ async def test_abort_is_idempotent() -> None:
         conn.abort()  # second abort: no-op, never raises
 
 
+async def test_async_context_manager_aborts_on_exit() -> None:
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await read_startup(reader)
+        writer.write(trust_handshake())
+        await writer.drain()
+        await reader.read()
+
+    async with scripted_server(handler) as (host, port):
+        async with await connect(host, port) as conn:
+            assert conn.backend_pid == 4242
+        assert conn._writer.transport.is_closing()  # __aexit__ hard-closed the socket
+
+
+async def test_async_context_manager_aborts_on_error() -> None:
+    """An exception inside the block still hard-closes and propagates (no suppression)."""
+
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await read_startup(reader)
+        writer.write(trust_handshake())
+        await writer.drain()
+        await reader.read()
+
+    async with scripted_server(handler) as (host, port):
+        conn = await connect(host, port)
+        with pytest.raises(RuntimeError, match="boom"):
+            async with conn:
+                raise RuntimeError("boom")
+        assert conn._writer.transport.is_closing()
+
+
 async def test_abort_tolerates_non_write_transport() -> None:
     class ReadOnlyTransport(asyncio.ReadTransport):
         def is_closing(self) -> bool:
