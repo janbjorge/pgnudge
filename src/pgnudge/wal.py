@@ -130,7 +130,7 @@ class WalFeed(BaseFeed):
             if self.tables:
                 opts.append(('"add-tables"', ",".join(self.tables)))
             return ", ".join(f"{name} {_quote_value(value)}" for name, value in opts)
-        return '"skip-empty-xacts" \'1\''
+        return "\"skip-empty-xacts\" '1'"
 
     # -- supervisor ---------------------------------------------------------------
 
@@ -157,49 +157,51 @@ class WalFeed(BaseFeed):
                 await self._reconnect_pause(attempt)
                 continue
 
-            self.conn = conn
-            self.connection_pid = conn.backend_pid
-            slot = f"pgnudge_{os.getpid()}_{secrets.token_hex(3)}"
-            try:
-                await conn.simple_query(
-                    # SNAPSHOT 'nothing': from-connect-only, the Resync refetch is the backfill
-                    f'CREATE_REPLICATION_SLOT "{slot}" TEMPORARY LOGICAL {self.plugin} (SNAPSHOT \'nothing\')'
-                )
-                await conn.start_replication(
-                    f'START_REPLICATION SLOT "{slot}" LOGICAL 0/0 ({self._plugin_options()})'
-                )
-                self.slot_name = slot
-                attempt = 0
-                self._emit_resync("connected" if first else "reconnected")
-                self.log.info("streaming from slot %s (backend pid %s)", slot, conn.backend_pid)
-                first = False
+            # async with drives abort() on both the normal and the error path
+            # (WalsenderConnection.__aexit__); the finally only resets our state.
+            async with conn:
+                self.conn = conn
+                self.connection_pid = conn.backend_pid
+                slot = f"pgnudge_{os.getpid()}_{secrets.token_hex(3)}"
+                try:
+                    await conn.simple_query(
+                        # SNAPSHOT 'nothing': from-connect-only, the Resync refetch is the backfill
+                        f"CREATE_REPLICATION_SLOT \"{slot}\" TEMPORARY LOGICAL {self.plugin} (SNAPSHOT 'nothing')"
+                    )
+                    await conn.start_replication(
+                        f'START_REPLICATION SLOT "{slot}" LOGICAL 0/0 ({self._plugin_options()})'
+                    )
+                    self.slot_name = slot
+                    attempt = 0
+                    self._emit_resync("connected" if first else "reconnected")
+                    self.log.info("streaming from slot %s (backend pid %s)", slot, conn.backend_pid)
+                    first = False
 
-                self.last_lsn = 0
-                self.last_inbound = time.monotonic()
-                async with self._feedback_running(conn):
-                    while True:
-                        msg = await conn.read_stream()
-                        self.last_inbound = time.monotonic()
-                        if isinstance(msg, XLogData):
-                            self.last_lsn = max(self.last_lsn, msg.end_lsn)
-                            names = parse(msg.payload)
-                            trace_frame(self.log, msg, "-> %s", names)
-                            for table in names:
-                                self._push_raw(table)
-                        else:  # Keepalive; read_stream returns nothing else
-                            self.last_lsn = max(self.last_lsn, msg.end_lsn)
-                            if msg.reply_requested:
-                                await conn.send_standby_status(self.last_lsn)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                # fall through to reconnect with a fresh slot
-                self.log.warning("stream error on slot %s, reconnecting: %s", slot, exc)
-            finally:
-                self.connection_pid = None
-                self.slot_name = None
-                self.conn = None
-                conn.abort()
+                    self.last_lsn = 0
+                    self.last_inbound = time.monotonic()
+                    async with self._feedback_running(conn):
+                        while True:
+                            msg = await conn.read_stream()
+                            self.last_inbound = time.monotonic()
+                            if isinstance(msg, XLogData):
+                                self.last_lsn = max(self.last_lsn, msg.end_lsn)
+                                names = parse(msg.payload)
+                                trace_frame(self.log, msg, "-> %s", names)
+                                for table in names:
+                                    self._push_raw(table)
+                            else:  # Keepalive; read_stream returns nothing else
+                                self.last_lsn = max(self.last_lsn, msg.end_lsn)
+                                if msg.reply_requested:
+                                    await conn.send_standby_status(self.last_lsn)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    # fall through to reconnect with a fresh slot
+                    self.log.warning("stream error on slot %s, reconnecting: %s", slot, exc)
+                finally:
+                    self.connection_pid = None
+                    self.slot_name = None
+                    self.conn = None
 
             if not self._closing:
                 attempt += 1
