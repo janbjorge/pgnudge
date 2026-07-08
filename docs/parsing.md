@@ -38,6 +38,42 @@ from CopyData (`d`) messages and returns them as frozen dataclasses:
 | `w` XLogData | `!QQQ` start_lsn, end_lsn, send-time; payload follows | `XLogData(start_lsn, end_lsn, payload)` |
 | `k` keepalive | `!QQB` end_lsn, send-time, reply-requested | `Keepalive(end_lsn, reply_requested)` |
 
+Every frame nests the same way: the message envelope wraps a CopyData
+byte, which wraps a subtype byte, which prefixes a fixed struct. All
+fields big-endian. The envelope length counts itself plus the body but
+not the leading type byte, so the body is `length - 4`.
+
+```
+message envelope (all backend messages)
++------+-------------------+========================================+
+| type |     length        |                body                    |
+| 'd'  |     int32         |     (CopyData payload, below)          |
++------+-------------------+========================================+
+  1 B         4 B               length - 4 bytes
+              \___ counts length field + body, not the type byte ___/
+
+'w' XLogData  (server to client, carries WAL)
++------+----------+----------+----------+=====================+
+| 'w'  | start_lsn|  end_lsn | send_time|      payload        |
++------+----------+----------+----------+=====================+
+  1 B     8 B  Q    8 B  Q     8 B  Q     rest of body -> XLogData.payload
+          \__ struct.unpack !QQQ, body[1:25] __/   body[25:]
+
+'k' Keepalive  (server to client, may demand a reply)
++------+----------+----------+-------+
+| 'k'  |  end_lsn | send_time| reply |
++------+----------+----------+-------+
+  1 B     8 B  Q    8 B  Q     1 B B
+          \__ struct.unpack !QQB, body[1:18] __/
+
+'r' Standby status update  (client to server, the only reply frame)
++------+------+----------+----------+----------+----------+-------+
+| 'd'  | 'r'  |  written | flushed  | applied  |timestamp | reply |
++------+------+----------+----------+----------+----------+-------+
+ env.    1 B    8 B  Q     8 B  Q     8 B  Q     8 B  Q     1 B B
+         \______ struct.pack !QQQQB; same LSN thrice, then ts, flag _/
+```
+
 Send-times are skipped. `XLogData.start_lsn` is the WAL position of
 `payload[0]`; the logical path ignores it, the physical walker checks
 every message against its own position and declares desync on any gap.
