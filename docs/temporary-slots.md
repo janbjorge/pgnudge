@@ -5,7 +5,7 @@ logical decoding over the streaming-replication protocol; the primitive that
 makes it zero-footprint is the **temporary replication slot**. This page lays
 out the machinery in PostgreSQL's own terms, the guarantees that fall out of
 it, and the cases where you should use something else. The parsing layers,
-frame by frame, are in [parsing.md](parsing.md).
+frame by frame, are in [parsing-reference.md](parsing-reference.md).
 
 ## The WAL is already a change feed
 
@@ -117,6 +117,11 @@ on that interval, unconditionally, whether or not anything arrived. It is
 a belt-and-braces bound on staleness: a wakeup lost to a failure mode
 nobody has found yet costs at most one interval, because the periodic
 refetch reconciles everything regardless.
+
+The stages that do this (`Intake`, `Coalescer`, `Debouncer`) and the
+`Event`/`Batch`/`Resync` fields they produce are documented at the
+structure level in
+[parsing-reference.md](parsing-reference.md#convergence-everything-becomes-a-string).
 
 ## Polling vs. pgnudge
 
