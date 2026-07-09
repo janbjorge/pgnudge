@@ -51,7 +51,14 @@ jobs:
       - run: .wheelenv/bin/python -m pytest -q -m "not benchmark"
       # publish the exact artifact just proven above
       - run: uv publish --trusted-publishing always
-      # cut a GitHub Release from the tag: auto notes + the built artifacts
-      - run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes --verify-tag
+      # cut a GitHub Release from the tag: auto notes + the built artifacts.
+      # idempotent so a re-run after a successful publish does not hard-fail on
+      # an already-existing release
+      - run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --generate-notes --verify-tag
+          fi
         env:
           GH_TOKEN: ${{ github.token }}
