@@ -4,7 +4,7 @@ How `RawFeed` turns a raw physical replication stream into
 `schema.table` nudges with zero server footprint, and where the edges
 are. Companion to [temporary-slots.md](temporary-slots.md), which covers
 the logical transport; byte layouts and parser structures are in
-[parsing.md](parsing.md).
+[parsing-reference.md](parsing-reference.md).
 
 ## Why this transport exists
 
@@ -87,6 +87,9 @@ its transaction id and a `CommitGate` buffers per transaction:
 - too many open transactions (default cap 4096): evict the oldest as
   if committed, because a spurious nudge beats a lost one.
 
+The `CommitGate` structure and its per-transaction bucketing are in
+[parsing-reference.md](parsing-reference.md#the-structures).
+
 ## Names
 
 WAL identifies relations by (tablespace, database, relfilenode), not by
@@ -102,6 +105,9 @@ drop, so catalog and TOAST churn never nudges. Other databases never
 reach the resolver at all: the stream carries the whole cluster's WAL,
 but any change whose database oid is not the connected database's is
 dropped at commit time, before name resolution.
+
+The `RelResolver` caching rules are in
+[parsing-reference.md](parsing-reference.md#the-structures).
 
 ## The gaps, stated plainly
 
