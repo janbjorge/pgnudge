@@ -368,6 +368,13 @@ with the bridge.
   from the password and is offline-crackable, so shipping it over plaintext
   leaks the credential. MD5 auth is deprecated in PostgreSQL 18; prefer
   SCRAM-SHA-256.
+- CLI TLS via `PGSSLMODE`: the `pgnudge` command's `--ssl` flag turns on when
+  `PGSSLMODE` is `require`, `verify-ca`, or `verify-full`, and all three map to
+  the same verify-full context (cert **and** hostname checked against the
+  system CA bundle - `require`/`verify-ca` are effectively upgraded). Unlike
+  libpq, `prefer` (and `allow`/`disable`/unset) stay plaintext: pgnudge never
+  silently tries TLS and falls back. For encrypt-without-verification, drive the
+  library directly with your own `ssl.SSLContext` rather than the CLI.
 - Logging: the `pgnudge.wal` logger (stdlib `logging`, no handlers configured by
   the library) reports connect failures and stream errors at WARNING, successful
   (re)connects at INFO, and backoff timing at DEBUG. A feed that reconnects in a
