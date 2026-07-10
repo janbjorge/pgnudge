@@ -218,8 +218,27 @@ async def test_supervisor_keeps_retrying_when_server_unreachable(
         await asyncio.sleep(0.1)  # several connect -> backoff rounds
         assert feed.connection_pid is None
         assert feed.slot_name is None
+        assert feed.last_error is not None  # supervisor records the connect failure
     assert any("failed" in r.message and r.levelno == logging.WARNING for r in caplog.records)
     assert any("reconnect attempt" in r.message and r.levelno == logging.DEBUG for r in caplog.records)
+
+
+async def test_persistent_connect_failure_escalates_to_error(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Lower the threshold to 1 so the supervisor escalates deterministically on
+    # its first failed connect against a dead port, without racing the backoff.
+    monkeypatch.setattr(WalFeed, "CONNECT_ERROR_THRESHOLD", 1)
+    caplog.set_level(logging.ERROR, logger="pgnudge.wal")
+    feed = wal_feed(refused_port())
+    async with feed:
+        for _ in range(200):  # wait for the first failure to land (well under 2 s)
+            if feed.last_error is not None:
+                break
+            await asyncio.sleep(0.005)
+    assert isinstance(feed.last_error, Exception)
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1  # escalated once via the supervisor, not per attempt
 
 
 async def test_supervisor_retries_when_slot_creation_fails() -> None:

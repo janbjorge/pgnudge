@@ -367,13 +367,21 @@ with the bridge.
 - Logging: the `pgnudge.wal` logger (stdlib `logging`, no handlers configured by
   the library) reports connect failures and stream errors at WARNING, successful
   (re)connects at INFO, and backoff timing at DEBUG. A feed that reconnects in a
-  loop is visible, not silent.
+  loop is visible, not silent. After five consecutive failed connects it
+  escalates once to ERROR so a dead-on-arrival feed (bad password, unreachable
+  host) stands out from transient blips; `feed.last_error` holds the most recent
+  connect exception (cleared on the next successful connect) for programmatic
+  health checks. Retries continue unchanged either way.
 - Errors: every exception pgnudge raises inherits `PgnudgeError`, so
   `except PgnudgeError` catches them all. `ConfigError` (bad constructor
   argument) also inherits `ValueError`, so an existing `except ValueError` keeps
   working. Stream and connection failures are internal lifecycle: the supervisor
   catches them, backs off, and reconnects with a `Resync`; they do not surface
-  on the iterator.
+  on the iterator. The one exception is a bug in pgnudge itself: if an internal
+  task dies with an *uncaught* exception, it is logged once at ERROR and
+  re-raised from `async for`, so a defect terminates the loop loudly with the
+  real traceback rather than hanging silently. Operational reconnects never do
+  this; only an unexpected internal failure does.
 
 ## Tested how
 

@@ -193,10 +193,17 @@ class FeedService:
     intake: Intake
     debouncer: Debouncer
     failsafe: float | None = None
+    # Logger for the fatal-task path; BaseFeed wires its transport logger in.
+    log: logging.Logger = field(default=logging.getLogger("pgnudge"))
     out: asyncio.Queue[FeedItem | None] = field(init=False, repr=False)  # None = closed
     tasks: list[asyncio.Task[None]] = field(init=False, default_factory=list)
     started: bool = field(init=False, default=False)
     closing: bool = field(init=False, default=False)
+    # An uncaught task exception (a pgnudge bug, not a connection drop). Set
+    # once by _on_task_done; re-raised once from BaseFeed.__anext__ so a dead
+    # task terminates ``async for`` loudly instead of hanging on out.get().
+    error: BaseException | None = field(init=False, default=None)
+    error_delivered: bool = field(init=False, default=False)
 
     def __post_init__(self) -> None:
         self.out = asyncio.Queue()
@@ -221,6 +228,27 @@ class FeedService:
             self.tasks.append(
                 asyncio.create_task(self._failsafe_loop(self.failsafe), name=f"{name}-failsafe")
             )
+        # Observe every task: without this an uncaught exception is invisible
+        # until aclose(), so the consumer blocks on out.get() forever.
+        for t in self.tasks:
+            t.add_done_callback(self._on_task_done)
+
+    def _on_task_done(self, task: asyncio.Task[None]) -> None:
+        """Surface a task that died with an uncaught exception.
+
+        Cancellation and any death during shutdown are expected; everything
+        else is a bug in a supervisor/pump loop that must not masquerade as a
+        quiet close. Capture it, log once, and queue the sentinel so the
+        blocked consumer wakes and ``__anext__`` can re-raise.
+        """
+        if self.closing or task.cancelled():
+            return
+        exc = task.exception()
+        if exc is None or self.error is not None:
+            return
+        self.error = exc
+        self.log.error("feed task %s died; terminating the feed", task.get_name(), exc_info=exc)
+        self.out.put_nowait(None)
 
     async def aclose(self) -> None:
         if self.closing:
@@ -236,8 +264,11 @@ class FeedService:
     # -- consumer side --
 
     async def next_item(self) -> FeedItem | None:
-        """Next item, or ``None`` once closed and drained."""
-        if self.closing and self.out.empty():
+        """Next item, or ``None`` once closed (or dead) and drained."""
+        # A captured task error is terminal like a close: once the buffered
+        # items and the sentinel are drained, stop returning so __anext__ ends
+        # instead of blocking on an out.get() that will never complete.
+        if (self.closing or self.error is not None) and self.out.empty():
             return None
         return await self.out.get()
 
@@ -258,11 +289,28 @@ class BaseFeed:
 
     Subclasses implement ``_supervisor`` (call ``_emit_resync`` per
     (re)connect, ``_push_raw`` per wakeup) and may override ``_extra_close``.
+
+    Failure semantics (two distinct modes):
+
+    * A *connection* failure (drop, refused connect, auth retry) is the
+      documented contract: the supervisor backs off and reconnects forever,
+      re-emitting ``Resync`` on the next connect. It never surfaces on the
+      iterator.
+    * An *uncaught internal* exception in a supervisor/pump/failsafe task is a
+      pgnudge bug, not an operational hiccup. It is logged once at ERROR and
+      re-raised from ``__anext__``, so ``async for`` terminates with the real
+      traceback instead of hanging silently. ``aclose()`` never re-raises.
     """
 
     # Subclasses override with their transport logger (pgnudge.wal / .raw);
     # the base default keeps ``_push_raw`` logging valid on its own.
     log: ClassVar[logging.Logger] = logging.getLogger("pgnudge")
+
+    # Consecutive failed connects before escalating from per-attempt WARNING
+    # to a single ERROR, so a permanently-failing feed (bad password,
+    # unreachable host) is visible to an operator tailing ERROR instead of
+    # lost in the retry noise. Retries themselves continue unchanged.
+    CONNECT_ERROR_THRESHOLD: ClassVar[int] = 5
 
     def __init__(
         self,
@@ -287,6 +335,7 @@ class BaseFeed:
                 max_batch_wait=max_batch_wait if max_batch_wait is not None else debounce * 20,
             ),
             failsafe=failsafe,
+            log=self.log,
         )
         self._backoff = Backoff(initial=backoff[0], maximum=backoff[1])
         self.connection_pid: int | None = None  # server backend pid while connected
@@ -294,6 +343,8 @@ class BaseFeed:
         self.liveness_timeout = liveness_timeout
         self.connect_timeout = connect_timeout
         self.last_inbound = time.monotonic()  # updated by the transport on every frame
+        self.last_error: Exception | None = None  # last connect failure; None while healthy
+        self._connect_failures = 0
 
     # -- lifecycle --
 
@@ -331,6 +382,13 @@ class BaseFeed:
     async def __anext__(self) -> FeedItem:
         item = await self._service.next_item()
         if item is None:
+            svc = self._service
+            # A dead task (not a normal close) re-raises exactly once, so the
+            # bug surfaces on the iterator with its original traceback instead
+            # of the loop ending silently.
+            if svc.error is not None and not svc.closing and not svc.error_delivered:
+                svc.error_delivered = True
+                raise svc.error
             raise StopAsyncIteration
         return item
 
@@ -356,6 +414,30 @@ class BaseFeed:
         delay = self._backoff_delay(attempt)
         self.log.debug("reconnect attempt %d in %.2fs", attempt, delay)
         await asyncio.sleep(delay)
+
+    def _record_connect_failure(self, exc: Exception) -> None:
+        """Track a failed connect and escalate once if failures persist.
+
+        Retry behavior is unchanged (the documented contract). This only
+        exposes ``last_error`` for health checks and, on the
+        ``CONNECT_ERROR_THRESHOLD``-th consecutive failure, emits a single
+        ERROR so a dead-on-arrival feed is not buried in the per-attempt
+        WARNING stream. Later failures in the same streak stay quiet; a
+        successful connect resets the streak so a fresh one can escalate again.
+        """
+        self.last_error = exc
+        self._connect_failures += 1
+        if self._connect_failures == self.CONNECT_ERROR_THRESHOLD:
+            self.log.error(
+                "still cannot connect after %d attempts; last error: %s",
+                self._connect_failures,
+                exc,
+            )
+
+    def _record_connect_success(self) -> None:
+        """Clear the connect-failure state once a connection is established."""
+        self.last_error = None
+        self._connect_failures = 0
 
     async def _feedback_loop(self, conn: WalsenderConnection) -> None:
         await StatusFeedback(

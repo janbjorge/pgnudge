@@ -155,9 +155,12 @@ class WalFeed(BaseFeed):
                 )
             except Exception as exc:
                 self.log.warning("connect to %s:%d failed: %s", self.host, self.port, exc)
+                self._record_connect_failure(exc)
                 attempt += 1
                 await self._reconnect_pause(attempt)
                 continue
+
+            self._record_connect_success()  # connect + auth succeeded; clear failure state
 
             # async with drives abort() on both the normal and the error path
             # (WalsenderConnection.__aexit__); the finally only resets our state.

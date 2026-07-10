@@ -278,6 +278,36 @@ async def test_service_aclose_survives_crashed_task() -> None:
     assert await asyncio.wait_for(svc.next_item(), 1.0) is None
 
 
+async def test_service_dead_task_queues_sentinel_without_aclose() -> None:
+    # The hang the hardening targets: a task dies with an uncaught exception
+    # and nobody calls aclose(). The done-callback must queue the sentinel so
+    # a consumer blocked on next_item() wakes instead of blocking forever.
+    svc = service()
+
+    async def transport() -> None:
+        raise RuntimeError("supervisor died")
+
+    svc.start(transport, name="test")
+    assert await asyncio.wait_for(svc.next_item(), 1.0) is None  # never hangs
+    assert isinstance(svc.error, RuntimeError)
+    await svc.aclose()
+
+
+async def test_service_clean_task_return_is_not_an_error() -> None:
+    # A supervisor that returns (rather than raising) is not a failure: the
+    # done-callback must not record an error or queue a spurious sentinel.
+    svc = service()
+
+    async def transport() -> None:
+        svc.emit(Resync("connected"))  # returns cleanly, no exception
+
+    svc.start(transport, name="test")
+    assert await asyncio.wait_for(svc.next_item(), 1.0) == Resync("connected")
+    await asyncio.sleep(0.01)  # let the done-callback run
+    assert svc.error is None
+    await svc.aclose()
+
+
 # -- BaseFeed ---------------------------------------------------------------------
 
 
@@ -296,6 +326,49 @@ class FakeFeed(BaseFeed):
 
     async def _extra_close(self) -> None:
         self.closes += 1
+
+
+class CrashFeed(BaseFeed):
+    """Transport stub: emits one resync, then dies with an uncaught exception."""
+
+    def __init__(self) -> None:
+        super().__init__(debounce=0.03)
+
+    async def _supervisor(self) -> None:
+        self._emit_resync("connected")
+        raise RuntimeError("boom")
+
+
+async def test_basefeed_reraises_uncaught_task_death(caplog: pytest.LogCaptureFixture) -> None:
+    feed = CrashFeed()
+    with caplog.at_level(logging.ERROR, logger="pgnudge"):
+        async with feed:
+            # the buffered item is delivered first, then the failure surfaces
+            assert await asyncio.wait_for(anext(feed), 1.0) == Resync("connected")
+            with pytest.raises(RuntimeError, match="boom"):
+                await asyncio.wait_for(anext(feed), 1.0)
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1  # logged exactly once
+
+
+async def test_basefeed_reraises_task_death_only_once() -> None:
+    feed = CrashFeed()
+    async with feed:
+        await asyncio.wait_for(anext(feed), 1.0)  # drain the resync
+        with pytest.raises(RuntimeError, match="boom"):
+            await asyncio.wait_for(anext(feed), 1.0)
+        # re-raised once; the closed feed then stops cleanly, never hangs
+        with pytest.raises(StopAsyncIteration):
+            await asyncio.wait_for(anext(feed), 1.0)
+
+
+async def test_basefeed_normal_close_records_no_error(caplog: pytest.LogCaptureFixture) -> None:
+    feed = FakeFeed()
+    with caplog.at_level(logging.ERROR, logger="pgnudge"):
+        async with feed:
+            await asyncio.wait_for(anext(feed), 1.0)
+    assert feed._service.error is None  # cancellation on close is not an error
+    assert [r for r in caplog.records if r.levelno == logging.ERROR] == []
 
 
 async def test_basefeed_iterates_resync_then_batch_and_closes() -> None:
@@ -340,3 +413,32 @@ async def test_basefeed_backoff_delegates() -> None:
     feed = FakeFeed()
     assert 0.05 <= feed._backoff_delay(1) <= 0.15
     await feed.aclose()
+
+
+# -- connect-failure escalation ---------------------------------------------------
+
+
+def test_connect_failure_sets_last_error_and_escalates_once(caplog: pytest.LogCaptureFixture) -> None:
+    feed = FakeFeed()
+    exc = ConnectionError("nope")
+    with caplog.at_level(logging.ERROR, logger="pgnudge"):
+        for _ in range(feed.CONNECT_ERROR_THRESHOLD * 3):  # keep failing past the threshold
+            feed._record_connect_failure(exc)
+    assert feed.last_error is exc
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1  # escalated exactly once, not once per attempt
+    assert str(feed.CONNECT_ERROR_THRESHOLD) in errors[0].message
+
+
+def test_connect_success_clears_error_and_allows_reescalation(caplog: pytest.LogCaptureFixture) -> None:
+    feed = FakeFeed()
+    with caplog.at_level(logging.ERROR, logger="pgnudge"):
+        for _ in range(feed.CONNECT_ERROR_THRESHOLD):
+            feed._record_connect_failure(ConnectionError("first streak"))
+        assert len([r for r in caplog.records if r.levelno == logging.ERROR]) == 1
+        feed._record_connect_success()
+        assert feed.last_error is None  # cleared on a successful connect
+        caplog.clear()
+        for _ in range(feed.CONNECT_ERROR_THRESHOLD):  # a fresh streak escalates again
+            feed._record_connect_failure(ConnectionError("second streak"))
+        assert len([r for r in caplog.records if r.levelno == logging.ERROR]) == 1
