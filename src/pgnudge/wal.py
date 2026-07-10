@@ -31,11 +31,16 @@ def _quote_value(v: str) -> str:
 class WalFeed(BaseFeed):
     """Async-iterable ``Resync | Batch`` feed from a temporary logical slot.
 
-    Payloads are ``schema.table``. ``tables`` filters server-side (wal2json
-    only); ``ssl`` takes True or an ``ssl.SSLContext``; ``status_interval``
-    must stay under the server's ``wal_sender_timeout`` (default 60 s).
-    ``liveness_timeout`` (must exceed ``status_interval``; None disables)
-    bounds how long the feed tolerates a silent server before reconnecting.
+    Payloads are ``schema.table``. ``tables`` filters server-side and is
+    wal2json-only: pairing it with ``plugin="test_decoding"`` raises
+    ``ConfigError`` rather than silently ignoring the filter. Entries feed
+    wal2json's comma-separated ``add-tables`` option, so a name containing a
+    comma is rejected (it would split and never match); ``*`` is a valid
+    wal2json wildcard and is passed through. ``ssl`` takes True or an
+    ``ssl.SSLContext``; ``status_interval`` must stay under the server's
+    ``wal_sender_timeout`` (default 60 s). ``liveness_timeout`` (must exceed
+    ``status_interval``; None disables) bounds how long the feed tolerates a
+    silent server before reconnecting.
     """
 
     log: ClassVar[logging.Logger] = logging.getLogger("pgnudge.wal")
@@ -78,6 +83,24 @@ class WalFeed(BaseFeed):
         )
         if plugin not in ("wal2json", "test_decoding"):
             raise ConfigError(f"unsupported plugin {plugin!r}")
+        if tables is not None:
+            # test_decoding has no table filter, so a tables= would be silently
+            # ignored - an unfiltered feed with no signal. Reject it.
+            if plugin == "test_decoding":
+                raise ConfigError(
+                    "tables filtering requires the wal2json plugin; "
+                    "test_decoding streams every table"
+                )
+            # A comma in a name splits inside wal2json's own comma-separated
+            # add-tables parsing, so that table would never match: a missed
+            # wakeup with no bracketing Resync. Reject it up front. ('*' is a
+            # legitimate wal2json wildcard and is kept.)
+            for name in tables:
+                if "," in name:
+                    raise ConfigError(
+                        f"table name {name!r} contains a comma, which breaks wal2json's "
+                        "comma-separated add-tables option parsing"
+                    )
         self.host = host
         self.port = port
         self.user = user
