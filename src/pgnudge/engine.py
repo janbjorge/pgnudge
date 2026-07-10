@@ -306,6 +306,12 @@ class BaseFeed:
     # the base default keeps ``_push_raw`` logging valid on its own.
     log: ClassVar[logging.Logger] = logging.getLogger("pgnudge")
 
+    # Consecutive failed connects before escalating from per-attempt WARNING
+    # to a single ERROR, so a permanently-failing feed (bad password,
+    # unreachable host) is visible to an operator tailing ERROR instead of
+    # lost in the retry noise. Retries themselves continue unchanged.
+    CONNECT_ERROR_THRESHOLD: ClassVar[int] = 5
+
     def __init__(
         self,
         *,
@@ -337,6 +343,8 @@ class BaseFeed:
         self.liveness_timeout = liveness_timeout
         self.connect_timeout = connect_timeout
         self.last_inbound = time.monotonic()  # updated by the transport on every frame
+        self.last_error: Exception | None = None  # last connect failure; None while healthy
+        self._connect_failures = 0
 
     # -- lifecycle --
 
@@ -406,6 +414,30 @@ class BaseFeed:
         delay = self._backoff_delay(attempt)
         self.log.debug("reconnect attempt %d in %.2fs", attempt, delay)
         await asyncio.sleep(delay)
+
+    def _record_connect_failure(self, exc: Exception) -> None:
+        """Track a failed connect and escalate once if failures persist.
+
+        Retry behavior is unchanged (the documented contract). This only
+        exposes ``last_error`` for health checks and, on the
+        ``CONNECT_ERROR_THRESHOLD``-th consecutive failure, emits a single
+        ERROR so a dead-on-arrival feed is not buried in the per-attempt
+        WARNING stream. Later failures in the same streak stay quiet; a
+        successful connect resets the streak so a fresh one can escalate again.
+        """
+        self.last_error = exc
+        self._connect_failures += 1
+        if self._connect_failures == self.CONNECT_ERROR_THRESHOLD:
+            self.log.error(
+                "still cannot connect after %d attempts; last error: %s",
+                self._connect_failures,
+                exc,
+            )
+
+    def _record_connect_success(self) -> None:
+        """Clear the connect-failure state once a connection is established."""
+        self.last_error = None
+        self._connect_failures = 0
 
     async def _feedback_loop(self, conn: WalsenderConnection) -> None:
         await StatusFeedback(

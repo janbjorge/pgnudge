@@ -413,3 +413,32 @@ async def test_basefeed_backoff_delegates() -> None:
     feed = FakeFeed()
     assert 0.05 <= feed._backoff_delay(1) <= 0.15
     await feed.aclose()
+
+
+# -- connect-failure escalation ---------------------------------------------------
+
+
+def test_connect_failure_sets_last_error_and_escalates_once(caplog: pytest.LogCaptureFixture) -> None:
+    feed = FakeFeed()
+    exc = ConnectionError("nope")
+    with caplog.at_level(logging.ERROR, logger="pgnudge"):
+        for _ in range(feed.CONNECT_ERROR_THRESHOLD * 3):  # keep failing past the threshold
+            feed._record_connect_failure(exc)
+    assert feed.last_error is exc
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1  # escalated exactly once, not once per attempt
+    assert str(feed.CONNECT_ERROR_THRESHOLD) in errors[0].message
+
+
+def test_connect_success_clears_error_and_allows_reescalation(caplog: pytest.LogCaptureFixture) -> None:
+    feed = FakeFeed()
+    with caplog.at_level(logging.ERROR, logger="pgnudge"):
+        for _ in range(feed.CONNECT_ERROR_THRESHOLD):
+            feed._record_connect_failure(ConnectionError("first streak"))
+        assert len([r for r in caplog.records if r.levelno == logging.ERROR]) == 1
+        feed._record_connect_success()
+        assert feed.last_error is None  # cleared on a successful connect
+        caplog.clear()
+        for _ in range(feed.CONNECT_ERROR_THRESHOLD):  # a fresh streak escalates again
+            feed._record_connect_failure(ConnectionError("second streak"))
+        assert len([r for r in caplog.records if r.levelno == logging.ERROR]) == 1

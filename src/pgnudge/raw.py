@@ -158,9 +158,12 @@ class RawFeed(BaseFeed):
                 stream = await self.connect_once("true")
             except Exception as exc:
                 self.log.warning("connect to %s:%d failed: %s", self.host, self.port, exc)
+                self._record_connect_failure(exc)
                 attempt += 1
                 await self._reconnect_pause(attempt)
                 continue
+
+            self._record_connect_success()  # stream connect + auth succeeded; clear failure state
 
             # Nested async with drives abort() for both sockets on every exit
             # path (WalsenderConnection.__aexit__); the finally only resets state.
