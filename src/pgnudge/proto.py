@@ -272,6 +272,14 @@ class WalsenderConnection:
         await self._writer.drain()
 
     async def _send_md5_password(self, body: bytes, user: str, password: str | None) -> None:
+        # Gate MD5 like cleartext: the token is derived from the password and
+        # is offline-crackable, so shipping it over plaintext leaks the
+        # credential. MD5 auth is deprecated in PostgreSQL 18; prefer SCRAM.
+        if not self.tls:
+            raise PgServerError.from_message(
+                "refusing MD5 password on an unencrypted connection; "
+                "enable ssl= or use SCRAM-SHA-256 (MD5 is deprecated in PostgreSQL 18)"
+            )
         if password is None:
             raise PgServerError.from_message("server requested a password but none was given")
         salt = body[4:8]
