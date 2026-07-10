@@ -373,7 +373,11 @@ with the bridge.
   argument) also inherits `ValueError`, so an existing `except ValueError` keeps
   working. Stream and connection failures are internal lifecycle: the supervisor
   catches them, backs off, and reconnects with a `Resync`; they do not surface
-  on the iterator.
+  on the iterator. The one exception is a bug in pgnudge itself: if an internal
+  task dies with an *uncaught* exception, it is logged once at ERROR and
+  re-raised from `async for`, so a defect terminates the loop loudly with the
+  real traceback rather than hanging silently. Operational reconnects never do
+  this; only an unexpected internal failure does.
 
 ## Tested how
 
