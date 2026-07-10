@@ -55,23 +55,28 @@ jobs:
           --benchmark-columns=min,median,ops,rounds
           --benchmark-sort=mean
 
-  # keeps the wal2json path honest (default matrix runs test_decoding)
+  # keeps the wal2json path honest across every PG major (the default matrix
+  # exercises test_decoding); separate job so the main matrix stays fast
   test-wal2json:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ["16", "17", "18"]
     env:
-      POSTGRES_IMAGE: pgnudge-wal2json:16
+      POSTGRES_IMAGE: pgnudge-wal2json:${{ matrix.postgres }}
       PGNUDGE_PLUGIN: wal2json
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0   # hatch-vcs derives the version from tags; needs full history
-      # no public image ships wal2json for PG 16 (debezium/postgres dropped it),
-      # so build one: official postgres + the PGDG package
+      # no public image ships wal2json (debezium/postgres dropped it), so build
+      # one per major: official postgres + the matching PGDG package
       - run: |
-          docker build -t pgnudge-wal2json:16 - <<'EOF'
-          FROM postgres:16
+          docker build -t pgnudge-wal2json:${{ matrix.postgres }} - <<'EOF'
+          FROM postgres:${{ matrix.postgres }}
           RUN apt-get update -o Dir::Etc::sourcelist="sources.list.d/pgdg.list" -o Dir::Etc::sourceparts="-" \
-              && apt-get install -y --no-install-recommends postgresql-16-wal2json \
+              && apt-get install -y --no-install-recommends postgresql-${{ matrix.postgres }}-wal2json \
               && rm -rf /var/lib/apt/lists/*
           EOF
       - uses: astral-sh/setup-uv@v8.2.0
