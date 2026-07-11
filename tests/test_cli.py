@@ -2,6 +2,7 @@
 consume loop, and the observability taps; no PostgreSQL.
 """
 
+import argparse
 import logging
 from types import TracebackType
 from typing import Self
@@ -49,13 +50,36 @@ def test_port_is_int() -> None:
     assert args.port == 6432
 
 
-def test_ssl_defaults_from_pgsslmode(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("PGSSLMODE", "require")
-    assert build_parser().parse_args(["doctor"]).ssl is True
-    monkeypatch.setenv("PGSSLMODE", "prefer")
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [
+        ("require", True),
+        ("verify-ca", True),
+        ("verify-full", True),
+        ("prefer", False),  # libpq would try TLS here; pgnudge does not
+        ("allow", False),
+        ("disable", False),
+        ("", False),
+    ],
+)
+def test_ssl_defaults_from_pgsslmode(mode: str, expected: bool, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PGSSLMODE", mode)
+    assert build_parser().parse_args(["doctor"]).ssl is expected
+
+
+def test_ssl_default_when_pgsslmode_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("PGSSLMODE", raising=False)
     assert build_parser().parse_args(["doctor"]).ssl is False
-    monkeypatch.delenv("PGSSLMODE")
-    assert build_parser().parse_args(["doctor"]).ssl is False
+
+
+def test_ssl_help_documents_pgsslmode_interpretation() -> None:
+    # A libpq-habituated user must learn from --help how their PGSSLMODE maps,
+    # especially that prefer stays plaintext (a deviation from libpq).
+    parser = build_parser()
+    subparsers = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+    help_text = subparsers.choices["doctor"].format_help()
+    assert "verify-full" in help_text
+    assert "prefer" in help_text
 
 
 # -- verbosity ----------------------------------------------------------------

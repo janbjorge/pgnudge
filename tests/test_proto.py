@@ -178,7 +178,19 @@ async def test_cleartext_password_auth_sends_password_over_tls() -> None:
     assert got == [b"p" + b"hunter2\x00"]
 
 
-async def test_md5_password_auth_sends_hashed_token() -> None:
+async def test_md5_password_without_tls_is_refused() -> None:
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await read_startup(reader)
+        writer.write(auth_request(5, b"\x01\x02\x03\x04"))  # MD5Password
+        await writer.drain()
+        await reader.read()
+
+    async with scripted_server(handler) as (host, port):
+        with pytest.raises(PgServerError, match="refusing MD5"):
+            await connect(host, port, password="hunter2")
+
+
+async def test_md5_password_auth_sends_hashed_token_over_tls() -> None:
     import hashlib
 
     got: list[bytes] = []
@@ -195,7 +207,8 @@ async def test_md5_password_auth_sends_hashed_token() -> None:
         await reader.read()
 
     async with scripted_server(handler) as (host, port):
-        conn = await connect(host, port, password="hunter2")
+        conn = await tls_flagged_connection(host, port)
+        await conn._startup(user="alice", database="db", password="hunter2", application_name="pgnudge")
         conn.abort()
 
     inner = hashlib.md5(b"hunter2" + b"alice").hexdigest()
@@ -212,6 +225,20 @@ async def test_cleartext_request_without_password_raises() -> None:
 
     async with scripted_server(handler) as (host, port):
         conn = await tls_flagged_connection(host, port)
+        with pytest.raises(PgServerError, match="none was given"):
+            await conn._startup(user="alice", database="db", password=None, application_name="pgnudge")
+        conn.abort()
+
+
+async def test_md5_request_without_password_raises() -> None:
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await read_startup(reader)
+        writer.write(auth_request(5, b"\x01\x02\x03\x04"))
+        await writer.drain()
+        await reader.read()
+
+    async with scripted_server(handler) as (host, port):
+        conn = await tls_flagged_connection(host, port)  # past the TLS gate
         with pytest.raises(PgServerError, match="none was given"):
             await conn._startup(user="alice", database="db", password=None, application_name="pgnudge")
         conn.abort()

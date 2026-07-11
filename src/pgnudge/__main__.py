@@ -47,7 +47,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--ssl",
         action="store_true",
         default=os.environ.get("PGSSLMODE") in ("require", "verify-ca", "verify-full"),
-        help="require TLS (also honors PGSSLMODE=require/verify-ca/verify-full)",
+        help=(
+            "require TLS. Turned on by PGSSLMODE=require/verify-ca/verify-full, all "
+            "treated as verify-full (cert + hostname verified against system CAs); "
+            "prefer/allow/disable/unset stay plaintext, unlike libpq's prefer which "
+            "would try TLS first"
+        ),
     )
     connection.add_argument(
         "-v",
