@@ -24,6 +24,7 @@ from wire import (
 )
 
 from pgnudge import Batch, Resync, WalFeed
+from pgnudge.errors import ConfigError
 from pgnudge.proto import WalsenderConnection
 
 
@@ -103,6 +104,28 @@ def test_liveness_timeout_not_exceeding_status_interval_is_rejected() -> None:
 def test_empty_tables_list_is_rejected() -> None:
     with pytest.raises(ValueError, match="tables"):
         WalFeed(host="h", port=5432, user="u", database="d", tables=[])
+
+
+def test_tables_with_test_decoding_is_rejected() -> None:
+    # test_decoding has no table filter, so tables= must not be silently dropped.
+    with pytest.raises(ConfigError, match="requires the wal2json plugin"):
+        WalFeed(
+            host="h", port=5432, user="u", database="d",
+            plugin="test_decoding", tables=["public.picks"],
+        )
+
+
+def test_table_name_with_comma_is_rejected() -> None:
+    # A comma would split inside wal2json's add-tables option, so the table
+    # would never match: reject it instead of shipping a silent missed wakeup.
+    with pytest.raises(ConfigError, match="public.a,b"):
+        WalFeed(host="h", port=5432, user="u", database="d", tables=["public.a,b"])
+
+
+def test_wal2json_wildcard_table_is_accepted() -> None:
+    # '*' is a legitimate wal2json wildcard and must pass through unchanged.
+    feed = WalFeed(host="h", port=5432, user="u", database="d", tables=["public.*"])
+    assert "\"add-tables\" 'public.*'" in feed._plugin_options()
 
 
 def test_plugin_options_wal2json_quotes_and_filters_tables() -> None:

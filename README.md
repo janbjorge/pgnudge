@@ -202,6 +202,12 @@ an output plugin. That plugin is `wal2json` (default; preinstalled on Azure
 Flexible Server, RDS, and most managed platforms) or `test_decoding` (ships
 inside PostgreSQL itself).
 
+`tables=` filters server-side and is `wal2json`-only. Pairing it with
+`plugin="test_decoding"` raises `ConfigError` (test_decoding has no filter and
+streams every table). Entries feed wal2json's comma-separated `add-tables`
+option, so a name containing a comma is rejected up front; `*` is a valid
+wal2json wildcard and passes through.
+
 The full mechanics (logical decoding, temporary-slot semantics, the gap-free
 handshake argument, and when not to use pgnudge) are in
 [docs/temporary-slots.md](docs/temporary-slots.md).
