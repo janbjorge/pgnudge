@@ -438,15 +438,16 @@ This project follows
 
 ## CI Matrix
 
-Python 3.11-3.14 x PostgreSQL 16-18 on Ubuntu (test_decoding), plus one
-wal2json job on a CI-built `postgres:16` + PGDG `postgresql-16-wal2json`
-image (the debezium/postgres:16 image does NOT ship wal2json). Lint job
-runs ruff + mypy. Coverage gate `--cov-fail-under=98`.
+Python 3.11-3.14 x PostgreSQL 16-18 on Ubuntu (test_decoding), plus a
+wal2json job matrixed over PG 16/17/18, each on a CI-built
+`postgres:<major>` + PGDG `postgresql-<major>-wal2json` image (no public
+image ships wal2json; debezium/postgres dropped it). Lint job runs ruff +
+mypy. Coverage gate `--cov-fail-under=98`.
 
 ## Proven vs. untested (be honest in docs and commits)
 
-Proven live (PG 16 with wal2json, PG 17 with test_decoding via the pytest
-suite): SCRAM-SHA-256 auth; TLS handshake + SCRAM over TLS (self-signed
+Proven live (wal2json on PG 16/17/18, and test_decoding across the PG
+16-18 x Python 3.11-3.14 matrix, via the pytest suite): SCRAM-SHA-256 auth; TLS handshake + SCRAM over TLS (self-signed
 cert, CERT_NONE context); temporary slot is the only server object while
 connected; no backfill; client-side coalescing (50-row txn -> one Event,
 count=50); kill -> fresh slot, old auto-dropped; hard abort ->
@@ -463,9 +464,7 @@ Untested / absent: `ssl=True` verify-full against a real managed endpoint
 connect to the direct port); MD5 auth (deliberately absent); pgoutput (see
 the publications warning above); behavior under a long-running write
 transaction at connect (slot creation waits: connect latency, never
-history); PG 18 (in the CI matrix, not yet run; a new WAL page magic will
-warn once and the oracle test will catch real decode drift); big-endian
-servers (unsupported by the walker, deliberately).
+history); big-endian servers (unsupported by the walker, deliberately).
 
 Confirmed live (not in CI): Azure Flexible Server BLOCKS external
 START_REPLICATION PHYSICAL (`28000: no pg_hba.conf entry for replication

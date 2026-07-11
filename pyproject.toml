@@ -12,7 +12,7 @@ requires-python = ">=3.11"
 dependencies = ["scramp>=1.4"]
 keywords = ["postgresql", "logical-replication", "change-feed", "asyncio", "cache-invalidation"]
 classifiers = [
-  "Development Status :: 4 - Beta",
+  "Development Status :: 5 - Production/Stable",
   "Framework :: AsyncIO",
   "Intended Audience :: Developers",
   "License :: OSI Approved :: MIT License",
