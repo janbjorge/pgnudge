@@ -30,16 +30,13 @@ def _verbosity_level(count: int) -> int:
     return _LEVELS[min(count, len(_LEVELS) - 1)]
 
 
-def _env_int(name: str, fallback: int) -> int:
-    value = os.environ.get(name)
-    return int(value) if value else fallback
-
-
 def build_parser() -> argparse.ArgumentParser:
     connection = argparse.ArgumentParser(add_help=False)
     conn = connection.add_argument_group("connection")
     conn.add_argument("--host", default=os.environ.get("PGHOST", "127.0.0.1"))
-    conn.add_argument("--port", type=int, default=_env_int("PGPORT", 5432))
+    # a string default goes through type=int at parse time, so a bad PGPORT
+    # becomes a clean parser error instead of a traceback
+    conn.add_argument("--port", type=int, default=os.environ.get("PGPORT") or "5432")
     conn.add_argument("--user", default=os.environ.get("PGUSER"))
     conn.add_argument("--database", default=os.environ.get("PGDATABASE"))
     conn.add_argument("--password", default=os.environ.get("PGPASSWORD"))

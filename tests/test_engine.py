@@ -67,6 +67,22 @@ def test_validate_feed_params_rejects_empty_tables() -> None:
         validate_feed_params(status_interval=10.0, liveness_timeout=None, tables=[])
 
 
+def test_validate_feed_params_rejects_bad_engine_knobs() -> None:
+    """Nonsense windows, busy-loop timers, and an unbounded intake are config errors."""
+    with pytest.raises(ValueError, match="debounce"):
+        validate_feed_params(status_interval=10.0, liveness_timeout=None, tables=None, debounce=-0.1)
+    with pytest.raises(ValueError, match="max_batch_wait"):
+        validate_feed_params(status_interval=10.0, liveness_timeout=None, tables=None, max_batch_wait=-1.0)
+    with pytest.raises(ValueError, match="failsafe"):
+        validate_feed_params(status_interval=10.0, liveness_timeout=None, tables=None, failsafe=0.0)
+    with pytest.raises(ValueError, match="backoff"):
+        validate_feed_params(status_interval=10.0, liveness_timeout=None, tables=None, backoff=(0.0, 5.0))
+    with pytest.raises(ValueError, match="backoff"):
+        validate_feed_params(status_interval=10.0, liveness_timeout=None, tables=None, backoff=(1.0, 0.5))
+    with pytest.raises(ValueError, match="raw_queue_size"):
+        validate_feed_params(status_interval=10.0, liveness_timeout=None, tables=None, raw_queue_size=0)
+
+
 # -- Coalescer ----------------------------------------------------------------
 
 

@@ -30,7 +30,7 @@ from wire import (
 
 from pgnudge import Batch, RawFeed, Resync
 from pgnudge.proto import WalsenderConnection, format_lsn
-from pgnudge.raw import RelResolver
+from pgnudge.raw import RelResolver, parse_pg_size
 from pgnudge.xlog import RelChange
 
 PICKS = (1663, 5, 16384)
@@ -68,7 +68,11 @@ def catalog_rows(query: str) -> bytes:
 
 
 async def serve_catalog(
-    reader: asyncio.StreamReader, writer: asyncio.StreamWriter, *, insert_lsn_row: bytes = data_row(b"0/0")
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    *,
+    insert_lsn_row: bytes = data_row(b"0/0"),
+    seg_size_row: bytes = data_row(b"16MB"),
 ) -> None:
     while True:
         _, body = await read_frame(reader)
@@ -77,6 +81,8 @@ async def serve_catalog(
             writer.write(msg(b"T", b"\x00\x01") + data_row(b"5") + command_complete("SELECT") + ready_for_query())
         elif "pg_current_wal_insert_lsn" in query:
             writer.write(msg(b"T", b"\x00\x01") + insert_lsn_row + command_complete("SELECT") + ready_for_query())
+        elif "wal_segment_size" in query:
+            writer.write(msg(b"T", b"\x00\x01") + seg_size_row + command_complete("SHOW") + ready_for_query())
         else:
             writer.write(catalog_rows(query))
         await writer.drain()
@@ -89,10 +95,13 @@ class FakePhysicalWalsender:
     always streams ``wal2`` and idles.
     """
 
-    def __init__(self, *, wal1: WalStream, wal2: WalStream, first: str = "ok") -> None:
+    def __init__(
+        self, *, wal1: WalStream, wal2: WalStream, first: str = "ok", seg_size: bytes = b"16MB"
+    ) -> None:
         self.wal1 = wal1
         self.wal2 = wal2
         self.first = first
+        self.seg_size = seg_size
         self.stream_sessions = 0
         self.catalog_sessions = 0
         self.commands: list[str] = []
@@ -107,7 +116,13 @@ class FakePhysicalWalsender:
             writer.write(auth_request(0) + backend_key(9999) + ready_for_query())
             await writer.drain()
             broken = self.first == "no-insert-lsn" and self.catalog_sessions == 1
-            await serve_catalog(reader, writer, insert_lsn_row=b"" if broken else data_row(b"0/0"))
+            no_seg = self.first == "no-seg-size" and self.catalog_sessions == 1
+            await serve_catalog(
+                reader,
+                writer,
+                insert_lsn_row=b"" if broken else data_row(b"0/0"),
+                seg_size_row=b"" if no_seg else data_row(self.seg_size),
+            )
             return
         self.stream_sessions += 1
         nth = self.stream_sessions
@@ -175,6 +190,30 @@ def test_liveness_timeout_not_exceeding_status_interval_is_rejected() -> None:
 def test_empty_tables_list_is_rejected() -> None:
     with pytest.raises(ValueError, match="tables"):
         RawFeed(host="h", port=5432, user="u", database="d", tables=[])
+
+
+def test_nonpositive_raw_queue_size_is_rejected() -> None:
+    # maxsize < 1 would make the intake queue unbounded, silently disabling
+    # the overflow -> Resync contract
+    with pytest.raises(ValueError, match="raw_queue_size"):
+        RawFeed(host="h", port=5432, user="u", database="d", raw_queue_size=0)
+
+
+# -- parse_pg_size -------------------------------------------------------------------
+
+
+def test_parse_pg_size_units() -> None:
+    assert parse_pg_size("16MB") == 16 * 1024**2
+    assert parse_pg_size("1GB") == 1024**3
+    assert parse_pg_size("16384kB") == 16 * 1024**2
+    assert parse_pg_size("8192B") == 8192
+    assert parse_pg_size("8192") == 8192  # unitless means bytes
+    assert parse_pg_size(" 64 MB ") == 64 * 1024**2
+
+
+def test_parse_pg_size_rejects_junk() -> None:
+    with pytest.raises(ValueError, match="unparseable"):
+        parse_pg_size("lots")
 
 
 # -- resolver ------------------------------------------------------------------------
@@ -282,6 +321,7 @@ async def test_rawfeed_lifecycle_against_scripted_walsender(caplog: pytest.LogCa
             batch = await asyncio.wait_for(anext(feed), 2.0)
             assert isinstance(batch, Batch)
             assert batch.payloads() == ("public.stations",)
+            assert feed.last_error is None  # a healthy-then-dropped stream is not a connect failure
 
     assert server.stream_sessions == 2
     assert server.statuses == [wal1.pos + 0x1000]  # keepalive end acked
@@ -408,6 +448,70 @@ async def test_missing_insert_lsn_forces_reconnect(caplog: pytest.LogCaptureFixt
             assert isinstance(batch, Batch)
             assert batch.payloads() == ("public.stations",)
     assert any("WAL insert position" in r.message for r in caplog.records)
+
+
+async def test_missing_wal_segment_size_forces_reconnect(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.WARNING, logger="pgnudge.raw")
+    wal1, wal2 = picks_then_stations()
+    server = FakePhysicalWalsender(wal1=wal1, wal2=wal2, first="no-seg-size")
+    async with scripted_server(server.handle) as (_, port):
+        async with raw_feed(port) as feed:
+            assert await asyncio.wait_for(anext(feed), 2.0) == Resync("connected")
+            batch = await asyncio.wait_for(anext(feed), 2.0)
+            assert isinstance(batch, Batch)
+            assert batch.payloads() == ("public.stations",)
+    assert any("wal_segment_size" in r.message for r in caplog.records)
+
+
+async def test_nondefault_wal_segment_size_streams_cleanly() -> None:
+    """The catalog-reported wal_segment_size reaches the walker: a 1 MB-segment
+    stream whose start is segment-aligned but not 16 MB-aligned decodes end to
+    end (with the 16 MB default the walker would desync on the long header)."""
+    seg = 1024 * 1024
+    wal1 = WalStream(81 * seg, seg=seg)
+    wal1.add(heap_insert(xid=1, rel=PICKS))
+    wal1.add(commit(xid=1))
+    wal2 = WalStream(82 * seg, seg=seg)
+    wal2.add(heap_insert(xid=2, rel=STATIONS))
+    wal2.add(commit(xid=2))
+    server = FakePhysicalWalsender(wal1=wal1, wal2=wal2, seg_size=b"1MB")
+    async with scripted_server(server.handle) as (_, port):
+        async with raw_feed(port) as feed:
+            assert await asyncio.wait_for(anext(feed), 2.0) == Resync("connected")
+            batch = await asyncio.wait_for(anext(feed), 2.0)
+            assert isinstance(batch, Batch)
+            assert batch.payloads() == ("public.picks",)
+
+
+async def test_setup_failure_records_connect_failure(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A feed that authenticates but always dies during setup must expose
+    last_error and escalate once, not read healthy forever."""
+    monkeypatch.setattr(RawFeed, "CONNECT_ERROR_THRESHOLD", 1)
+    caplog.set_level(logging.ERROR, logger="pgnudge.raw")
+
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        params = await read_startup(reader)
+        writer.write(auth_request(0) + backend_key(1) + ready_for_query())
+        await writer.drain()
+        if params["replication"] == "database":
+            await serve_catalog(reader, writer)
+            return
+        await read_frame(reader)  # IDENTIFY_SYSTEM
+        writer.write(command_complete("IDENTIFY_SYSTEM") + ready_for_query())  # no row, every session
+        await writer.drain()
+        await reader.read()
+
+    async with scripted_server(handler) as (_, port):
+        async with raw_feed(port) as feed:
+            for _ in range(200):
+                if feed.last_error is not None:
+                    break
+                await asyncio.sleep(0.005)
+            assert feed.last_error is not None
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1  # escalated exactly once for the streak
 
 
 async def test_supervisor_exits_cleanly_when_closing_during_stream_error() -> None:

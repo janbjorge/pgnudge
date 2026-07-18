@@ -146,10 +146,15 @@ class XLogWalker:
     valid entry point. ``emit_from`` suppresses events from records ending
     at or before it: framing must start at a page boundary, but records
     already written when the caller attached are history, not news.
+    ``seg_size`` must match the server's ``wal_segment_size``: it decides
+    where long page headers (and XLOG_SWITCH zero fills) sit, so a wrong
+    value desyncs at the first boundary the two disagree on. The long
+    header itself still cross-checks it.
     """
 
     start_lsn: int
     emit_from: int = 0
+    seg_size: int = 16 * 1024 * 1024
     pos: int = field(init=False)
     buf: bytearray = field(init=False)
     skip: int = field(init=False, default=0)
@@ -157,7 +162,6 @@ class XLogWalker:
     rec: bytearray | None = field(init=False, default=None)
     rec_need: int | None = field(init=False, default=None)
     first_page: bool = field(init=False, default=True)
-    seg_size: int = field(init=False, default=16 * 1024 * 1024)
     warned_magic: bool = field(init=False, default=False)
 
     log: ClassVar[logging.Logger] = logging.getLogger("pgnudge.xlog")
@@ -213,6 +217,8 @@ class XLogWalker:
     def __post_init__(self) -> None:
         if self.start_lsn % self.BLCKSZ:
             raise ConfigError("start_lsn must be page-aligned; use XLogWalker.page_floor")
+        if self.seg_size < self.BLCKSZ or self.seg_size & (self.seg_size - 1):
+            raise ConfigError(f"seg_size {self.seg_size} is not a power-of-two multiple of BLCKSZ")
         self.pos = self.start_lsn
         self.buf = bytearray()
 
@@ -226,7 +232,16 @@ class XLogWalker:
     def feed(self, data: bytes) -> list[WalEvent]:
         """Buffer one stream chunk; return events for the records it completed."""
         self.buf += data
-        return [event for rec in self.records() if (event := self.parse_record(rec)) is not None]
+        events: list[WalEvent] = []
+        for rec in self.records():
+            # pos is exactly the record's end here (the generator is suspended
+            # at the yield). Suppressed records are still parsed: XLOG_SWITCH
+            # must arm raw_skip even when its record is pre-attach history.
+            emit = self.pos > self.emit_from
+            event = self.parse_record(rec)
+            if emit and event is not None:
+                events.append(event)
+        return events
 
     def consume(self, n: int) -> None:
         # CPython bytearray tracks an internal start offset, so front deletion
@@ -285,8 +300,7 @@ class XLogWalker:
                 record = bytes(self.rec)
                 self.rec = None
                 self.rec_need = None
-                if self.pos > self.emit_from:
-                    yield record
+                yield record
 
     def take_page_header(self) -> bool:
         """Consume one page header; return False until it is fully buffered.
