@@ -38,11 +38,11 @@ the WAL**.
 ```
 
 - **Logical** (`wal.py`): PostgreSQL's output plugin already turned WAL
-  into a short message that names the table. pgnudge just reads it.
-  Easy.
-- **Physical** (`xlog.py` + `raw.py`): the server ships raw WAL bytes.
+  into a short message that names the table, so pgnudge just reads it.
+- **Physical** (`xlog.py` + `raw.py`): the server ships raw WAL bytes and
   pgnudge decodes them itself, but only far enough to name the table,
-  never the row. Harder, and where most of the code lives.
+  never the row. This is the harder road, and where most of the code
+  lives.
 
 Downstream of the string, the two are indistinguishable.
 
@@ -235,9 +235,9 @@ Two consequences fall out of that shape:
   table in one txn collapse to one `RelChange` (first wins); a nudge is
   "this table moved", not a change count.
 - **Bounded memory.** Past `max_open` (4096) open transactions, the
-  oldest is evicted *as if it committed*. A spurious nudge beats a lost
-  one. A rolled-back transaction's bucket is simply dropped, never
-  released.
+  oldest is evicted *as if it committed*: an unnecessary refetch is
+  cheap, a missed change is a stale view. A rolled-back transaction's
+  bucket is simply dropped, never released.
 
 A `COMMIT` for xid 742 (and any listed subxids) releases the bucket.
 Now, finally, a name.

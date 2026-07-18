@@ -152,7 +152,7 @@ What changes:
 ```
                      poll every 2 s                pgnudge
  ─────────────────────────────────────────────────────────────────────
- change → wakeup     0–2 s (interval floor)        ~debounce (50 ms)
+ change → wakeup     0-2 s (interval floor)        ~debounce (50 ms)
  idle cost           1 query / interval / watcher  0 queries; 1 idle
                                                    walsender session
  schema needed       updated_at + index, every     none

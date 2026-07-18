@@ -7,11 +7,12 @@
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://pypi.org/project/pgnudge/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-pgnudge is a tiny async library that tells you **which tables just changed** in
+pgnudge is a tiny async library that tells you which tables just changed in
 PostgreSQL, so a live read model can re-render the instant the data moves. It
 carries no row data by design: you already know how to load your data, pgnudge
-just tells you *when*, and *what to reload*. And it leaves **nothing behind on
-the server** - no triggers, no functions, no persistent slots, no cleanup jobs.
+just tells you *when*, and *what to reload*. And it leaves nothing behind on
+the server: no triggers or functions to install, no persistent slots or
+cleanup jobs to manage.
 
 ```python
 from pgnudge import Batch, Resync, WalFeed
@@ -37,27 +38,25 @@ pip install pgnudge
 ```
 
 Python >= 3.11, PostgreSQL >= 16. One runtime dependency:
-[scramp](https://github.com/tlocke/scramp) (pure-Python SCRAM auth). **No
-database driver** - pgnudge speaks the PostgreSQL replication protocol itself.
+[scramp](https://github.com/tlocke/scramp) (pure-Python SCRAM auth). There is
+no database driver: pgnudge speaks the PostgreSQL replication protocol itself.
 
 ## Why pgnudge
 
-- **Zero server footprint.** The only server object is a *temporary* replication
-  slot, dropped automatically the instant the session ends (clean close, crash,
-  `kill -9`, or `pg_terminate_backend`). `RawFeed` needs no slot at all.
-- **Driver-free, one dependency.** A hand-rolled walsender client (TLS,
-  SCRAM-SHA-256, CopyBoth) instead of a database driver. `pip install pgnudge`
-  pulls in scramp and nothing else.
-- **Two transports, one contract.** `WalFeed` (logical decoding) or `RawFeed`
-  (physical WAL, decoded client-side). Same `Resync | Batch` stream either way;
-  the choice is one constructor.
-- **Coalesced wakeups.** A 500-row transaction on one table is one `Event`,
-  `count=500`, one wakeup, one refetch. Debounced client-side.
-- **Correct by construction.** At-least-once wakeups from the point of connect;
-  every gap is bracketed by a `Resync`. Handle `Resync` and nothing can make
-  your view wrong. No cursors to persist, no exactly-once to get wrong.
-- **Preflight `doctor`.** One command connects, fingerprints the platform, and
-  tells you which feed to use, with a copy-paste fix under every failed check.
+- The only server object is a *temporary* replication slot, dropped
+  automatically however the session ends. `RawFeed` needs no slot at all.
+- A hand-rolled walsender client (TLS, SCRAM-SHA-256, CopyBoth) stands in for
+  a database driver, so `pip install pgnudge` pulls in scramp and nothing else.
+- `WalFeed` (logical decoding) and `RawFeed` (physical WAL, decoded
+  client-side) yield the same `Resync | Batch` stream; the choice is one
+  constructor.
+- Wakeups coalesce: a 500-row transaction on one table is one `Event`,
+  `count=500`, one wakeup, one refetch, debounced client-side.
+- At-least-once wakeups from the point of connect, with every gap bracketed by
+  a `Resync`. Handle `Resync` and nothing can make your view wrong; there are
+  no cursors to persist and no exactly-once delivery to get wrong.
+- `pgnudge doctor` connects, fingerprints the platform, and tells you which
+  feed to use, with a copy-paste fix under every failed check.
 
 ## Should you use pgnudge?
 
@@ -84,15 +83,15 @@ A feed yields exactly two item types:
   arrival order. Each `Event` carries `payload` (`schema.table`, the stable v1
   payload contract), `first_seen`, `count`.
 
-**Delivery is at-least-once wakeups, from the point of connect only.** Events
+Delivery is at-least-once wakeups, from the point of connect only. Events
 are hints to refetch, never facts to apply. There is no history and no backfill,
 by design and by mechanism: the slot is created fresh at every (re)connect with
 `SNAPSHOT 'nothing'`, and can only decode forward. On reconnect a feed *resyncs*
-rather than resumes. No replay, no exactly-once, no row images: refetching is
-idempotent and you have a database right there. The gap-free-handshake argument
+rather than resumes. There is no replay, no exactly-once delivery, and no row
+images to apply: refetching is idempotent and you have a database right there. The gap-free-handshake argument
 is in [docs/temporary-slots.md](docs/temporary-slots.md).
 
-**Coalescing:** per-row changes within the debounce window collapse client-side
+Coalescing: per-row changes within the debounce window collapse client-side
 into one `Event` with a `count`. `INSERT`, `UPDATE`, `DELETE`, and `TRUNCATE`
 all nudge on `WalFeed` (`RawFeed` covers all but `TRUNCATE`). Neither transport
 carries other DDL, so pair migrations with a refetch if your view depends on
@@ -100,7 +99,7 @@ them.
 
 ## The zero-footprint guarantee
 
-`WalFeed` creates **nothing on the server that outlives the connection.**
+`WalFeed` creates nothing on the server that outlives the connection.
 
 ```
 your app ──── async for item in feed ────▶ Resync | Batch
@@ -117,7 +116,7 @@ change feed with connection-scoped lifetime: the server is contractually obliged
 to drop it the moment the session ends, whether by clean close, crash, `kill -9`,
 or `pg_terminate_backend`. The test suite ends by hard-aborting the socket with
 no protocol goodbye and asserting `pg_replication_slots` is empty. What is
-required is one-time server **configuration** (settings, not objects):
+required is one-time server configuration (settings, not objects):
 `wal_level = logical`, a `REPLICATION` role, and an output plugin.
 
 ## Two transports, one contract
@@ -152,9 +151,9 @@ feed = RawFeed(
 `RawFeed` needs no server change: it decodes physical WAL client-side, slot-less,
 at stock `wal_level = replica`. Nudges are commit-gated (rollbacks never nudge, a
 refetch never races an open transaction). The trade: the server streams the
-**whole cluster's** WAL, `TRUNCATE` is not detected, it opens a second plain
+whole cluster's WAL, `TRUNCATE` is not detected, it opens a second plain
 connection for catalog lookups, and it needs a `pg_hba.conf` `replication` entry.
-Treat it as a **self-hosted** transport; managed platforms are not known to
+Treat it as a self-hosted transport; managed platforms are not known to
 expose external physical streaming (untested). Mechanics in
 [docs/physical-wal.md](docs/physical-wal.md); byte layouts in
 [docs/parsing-reference.md](docs/parsing-reference.md).
@@ -189,33 +188,33 @@ confirm the live handshake.
 
 ## Ops notes
 
-- **Keepalive.** `status_interval` (default 10 s) must stay under
-  `wal_sender_timeout` (default 60 s). `liveness_timeout` (default 30 s, `None`
-  disables): inbound silence past it means a dead link, so the feed aborts and
-  reconnects instead of blocking forever.
-- **Budget.** While connected, each `WalFeed` holds one slot and one WAL sender
-  against `max_replication_slots` / `max_wal_senders`; a disconnected feed holds
-  nothing and retains no WAL. A `REPLICATION` role sees every table regardless of
-  SELECT grants; scope with `tables=` and treat it as privileged.
-- **TLS / auth.** `ssl=True` uses platform CA verification; pass an
-  `ssl.SSLContext` for custom trust. pgnudge refuses to send any password
-  (cleartext **or** MD5) on an unencrypted connection. Prefer SCRAM-SHA-256; MD5
-  is deprecated in PostgreSQL 18. CLI TLS keys off `PGSSLMODE`
-  (`require`/`verify-ca`/`verify-full` all map to verify-full; `prefer` and below
-  stay plaintext, no silent upgrade).
-- **Errors.** Every exception inherits `PgnudgeError`; `ConfigError` also
-  inherits `ValueError`. Stream/connection failures are internal lifecycle (the
+- `status_interval` (default 10 s) must stay under `wal_sender_timeout`
+  (default 60 s). `liveness_timeout` (default 30 s, `None` disables): inbound
+  silence past it means a dead link, so the feed aborts and reconnects instead
+  of blocking forever.
+- While connected, each `WalFeed` holds one slot and one WAL sender against
+  `max_replication_slots` / `max_wal_senders`; a disconnected feed holds
+  nothing and retains no WAL. A `REPLICATION` role sees every table regardless
+  of SELECT grants; scope with `tables=` and treat it as privileged.
+- `ssl=True` uses platform CA verification; pass an `ssl.SSLContext` for
+  custom trust. pgnudge refuses to send any password (cleartext or MD5) on an
+  unencrypted connection. Prefer SCRAM-SHA-256; MD5 is deprecated in
+  PostgreSQL 18. CLI TLS keys off `PGSSLMODE`
+  (`require`/`verify-ca`/`verify-full` all map to verify-full; `prefer` and
+  below stay plaintext, with no silent upgrade).
+- Every exception inherits `PgnudgeError`; `ConfigError` also inherits
+  `ValueError`. Stream/connection failures are internal lifecycle (the
   supervisor backs off and reconnects with a `Resync`), never surfaced on the
-  iterator. An *uncaught* internal bug is logged once at ERROR and re-raised from
-  `async for`, so a defect fails loudly rather than hanging.
-- **Fan-out.** For many consumers, run one `WalFeed` in a small bridge daemon
-  that republishes via `pg_notify`; consumers attach with plain `LISTEN` (any
-  driver, zero objects). `NOTIFY` can't track data changes without triggers, and
-  triggers are persistent catalog objects pgnudge refuses by premise; the bridge
-  keeps LISTEN's ergonomics with logical decoding's zero footprint.
-- **Thundering herd.** A restart reconnects every feed at once and every `Resync`
-  handler refetches at once. Reconnect timing is jittered; add jitter to your
-  refetch too, or fan out through the bridge daemon.
+  iterator. An *uncaught* internal bug is logged once at ERROR and re-raised
+  from `async for`, so a defect fails loudly rather than hanging.
+- For many consumers, run one `WalFeed` in a small bridge daemon that
+  republishes via `pg_notify`; consumers attach with plain `LISTEN` (any
+  driver, zero objects). `NOTIFY` can't track data changes without triggers,
+  and triggers are persistent catalog objects pgnudge refuses by premise; the
+  bridge keeps LISTEN's ergonomics with logical decoding's zero footprint.
+- A restart reconnects every feed at once and every `Resync` handler refetches
+  at once. Reconnect timing is jittered; add jitter to your refetch too, or
+  fan out through the bridge daemon.
 
 ## Testing
 
@@ -234,10 +233,11 @@ uv sync && uv run pytest
 
 ## Non-goals
 
-- **Not a queue.** No durability, no competing consumers, no retries. Use a job
-  queue ([pgqueuer]) if a message must be processed. pgnudge is its
-  broadcast-shaped sibling.
-- **Not CDC.** No row images, no before/after, no replay. Refetch.
+- **Not a queue.** There is no durability, no competing consumers, and no
+  retries. Use a job queue ([pgqueuer]) if a message must be processed;
+  pgnudge is its broadcast-shaped sibling.
+- **Not CDC.** There are no row images, no before/after, and no replay:
+  refetch instead.
 - **Not a driver.** The protocol client implements exactly what a
   logical-decoding consumer needs: startup, auth, simple query, CopyBoth.
 
