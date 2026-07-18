@@ -135,7 +135,7 @@ entry point),
 and an `XLOG_SWITCH` record zero-fills the rest of its segment with no
 page headers at all, crossed by a raw byte count. Completed records
 whose end position is at or before `emit_from` (the from-connect
-watermark) are dropped: history, not news.
+watermark) are dropped; they predate the connect.
 
 ### Record header and dispatch
 
@@ -165,7 +165,7 @@ without touching row contents. One byte of block id selects the form:
 | 254 DATA_LONG | main-data length, `<I` |
 | 253 ORIGIN | 2 bytes, skipped |
 | 252 TOPLEVEL_XID | 4 bytes, skipped |
-| 0–32 | one block reference (below) |
+| 0-32 | one block reference (below) |
 
 A block reference is fork_flags (1 byte) plus data length (`<H`). Flag
 0x10 (`BKPBLOCK_HAS_IMAGE`) appends a full-page-image header, `<HH`
@@ -179,7 +179,7 @@ main-fork reference (`fork_flags & 0x0F == 0`) names the changed
 relation. The walk ends when the remaining bytes equal the declared
 data total; any mismatch is a `WalSyncError`, never a guess. Block
 references are numbered 0 through 32 (`XLR_MAX_BLOCK_ID`); an id above
-that, below the 252–255 marker range, is a desync. None of the record
+that, below the 252-255 marker range, is a desync. None of the record
 types the walker cares about carries more than a few references, so the
 high end is never exercised in practice.
 
@@ -210,8 +210,8 @@ is covered in [physical-wal.md](physical-wal.md#commit-gating).
 `CommitGate.push` buckets each `RelChange` by xid, deduplicating on
 (db_oid, relfilenode) within the transaction, and releases the bucket
 on commit, drops it on abort. Past `max_open` (4096) open
-transactions, the oldest is evicted *as if committed*: a spurious
-nudge beats a lost one. `RelResolver` queries only unseen
+transactions, the oldest is evicted *as if committed*; an extra
+nudge only costs a refetch. `RelResolver` queries only unseen
 relfilenodes; system-schema relations cache as drops (empty string),
 and an unresolvable relfilenode is dropped uncached so its next
 appearance retries, covering catalog visibility that lags the WAL by
