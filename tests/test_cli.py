@@ -116,6 +116,18 @@ def test_flag_beats_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert args.host == "flaghost"
 
 
+def test_invalid_pgport_env_errors_cleanly(monkeypatch: pytest.MonkeyPatch) -> None:
+    # a bad PGPORT must be a parser error, not an int() traceback
+    monkeypatch.setenv("PGPORT", "abc")
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["doctor"])
+
+
+def test_empty_pgport_env_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PGPORT", "")
+    assert build_parser().parse_args(["doctor"]).port == 5432
+
+
 def test_missing_user_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("PGUSER", raising=False)
     monkeypatch.setenv("PGDATABASE", "d")

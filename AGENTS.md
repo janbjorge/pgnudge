@@ -124,7 +124,10 @@ src/pgnudge/
               mode accepts plain SQL; still driver-free). IDENTIFY_SYSTEM
               -> page-floored start, pg_current_wal_insert_lsn() as the
               from-connect watermark (flush is NOT enough under async
-              commit), walker -> CommitGate -> RelResolver (relfilenode ->
+              commit), SHOW wal_segment_size -> walker seg_size (long
+              page headers sit at segment boundaries; a non-default
+              --wal-segsize cluster desyncs without it),
+              walker -> CommitGate -> RelResolver (relfilenode ->
               schema.table, cached, event-driven lookups, system schemas
               cache as drops) -> same Resync|Batch contract. tables=
               filters client-side. TRUNCATE not detected (documented gap).

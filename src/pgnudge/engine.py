@@ -59,15 +59,37 @@ def trace_frame(log: logging.Logger, msg: XLogData, tail: str, *args: object) ->
 
 
 def validate_feed_params(
-    *, status_interval: float, liveness_timeout: float | None, tables: list[str] | None
+    *,
+    status_interval: float,
+    liveness_timeout: float | None,
+    tables: list[str] | None,
+    debounce: float = 0.05,
+    max_batch_wait: float | None = None,
+    failsafe: float | None = None,
+    backoff: tuple[float, float] = (0.1, 5.0),
+    raw_queue_size: int = 8192,
 ) -> None:
-    """Validate the feedback/liveness/table knobs shared by every transport."""
+    """Validate the knobs shared by every transport."""
     if status_interval <= 0:
         raise ConfigError("status_interval must be positive")
     if liveness_timeout is not None and liveness_timeout <= status_interval:
         raise ConfigError("liveness_timeout must exceed status_interval")
     if tables is not None and not tables:
         raise ConfigError("tables must be None or a non-empty list")
+    if debounce < 0:
+        raise ConfigError("debounce must be >= 0")
+    if max_batch_wait is not None and max_batch_wait < 0:
+        raise ConfigError("max_batch_wait must be >= 0")
+    if failsafe is not None and failsafe <= 0:
+        # zero or negative would busy-spin the failsafe loop, flooding Resync
+        raise ConfigError("failsafe must be positive (or None to disable)")
+    if backoff[0] <= 0 or backoff[1] < backoff[0]:
+        # a non-positive initial delay is a zero-sleep hot reconnect loop
+        raise ConfigError("backoff must be (initial > 0, maximum >= initial)")
+    if raw_queue_size < 1:
+        # asyncio.Queue treats maxsize < 1 as unbounded, silently disabling
+        # the overflow -> Resync contract
+        raise ConfigError("raw_queue_size must be at least 1")
 
 
 @dataclass(frozen=True, slots=True)
@@ -326,7 +348,14 @@ class BaseFeed:
         raw_queue_size: int = 8192,
     ) -> None:
         validate_feed_params(
-            status_interval=status_interval, liveness_timeout=liveness_timeout, tables=tables
+            status_interval=status_interval,
+            liveness_timeout=liveness_timeout,
+            tables=tables,
+            debounce=debounce,
+            max_batch_wait=max_batch_wait,
+            failsafe=failsafe,
+            backoff=backoff,
+            raw_queue_size=raw_queue_size,
         )
         self._service = FeedService(
             intake=Intake(maxsize=raw_queue_size),

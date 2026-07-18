@@ -106,6 +106,12 @@ def test_empty_tables_list_is_rejected() -> None:
         WalFeed(host="h", port=5432, user="u", database="d", tables=[])
 
 
+def test_nonpositive_failsafe_is_rejected() -> None:
+    # failsafe <= 0 would busy-spin the failsafe loop, flooding Resync
+    with pytest.raises(ValueError, match="failsafe"):
+        WalFeed(host="h", port=5432, user="u", database="d", failsafe=0.0)
+
+
 def test_tables_with_test_decoding_is_rejected() -> None:
     # test_decoding has no table filter, so tables= must not be silently dropped.
     with pytest.raises(ConfigError, match="requires the wal2json plugin"):
@@ -285,6 +291,35 @@ async def test_supervisor_retries_when_slot_creation_fails() -> None:
     assert attempts >= 2  # fresh connection per retry
 
 
+async def test_slot_creation_failure_records_connect_failure(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A feed that authenticates but can never create its slot (e.g. against
+    wal_level=replica) must expose last_error and escalate once, not read
+    healthy forever."""
+    monkeypatch.setattr(WalFeed, "CONNECT_ERROR_THRESHOLD", 1)
+    caplog.set_level(logging.ERROR, logger="pgnudge.wal")
+
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await read_startup(reader)
+        writer.write(auth_request(0) + backend_key(1) + ready_for_query())
+        await writer.drain()
+        await read_frame(reader)  # CREATE_REPLICATION_SLOT
+        writer.write(error_response("logical decoding requires wal_level >= logical", code="55000") + ready_for_query())
+        await writer.drain()
+        await reader.read()
+
+    async with scripted_server(handler) as (_, port):
+        async with wal_feed(port) as feed:
+            for _ in range(200):
+                if feed.last_error is not None:
+                    break
+                await asyncio.sleep(0.005)
+            assert feed.last_error is not None
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1  # escalated exactly once for the streak
+
+
 async def test_supervisor_exits_cleanly_when_closing_during_stream_error() -> None:
     proceed = asyncio.Event()
 
@@ -370,6 +405,7 @@ async def test_walfeed_lifecycle_against_scripted_walsender(caplog: pytest.LogCa
             batch = await asyncio.wait_for(anext(feed), 2.0)
             assert isinstance(batch, Batch)
             assert batch.payloads() == ("public.stations",)
+            assert feed.last_error is None  # a healthy-then-dropped stream is not a connect failure
 
     assert server.connections == 2
     assert server.statuses == [20]  # keepalive reply acked max(xlog 10, keepalive 20)

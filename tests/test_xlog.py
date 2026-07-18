@@ -268,6 +268,35 @@ def test_long_page_header_at_segment_start_updates_seg_size() -> None:
     assert walker.seg_size == SEG
 
 
+def test_walker_honors_smaller_wal_segment_size() -> None:
+    """A 1 MB-segment stream decodes with seg_size=1MB; the 16 MB default
+    reads the segment-start long header as record bytes and desyncs."""
+    seg = 1024 * 1024
+    s = WalStream(81 * seg, seg=seg)  # segment-aligned start; 81 MB is not 16 MB-aligned
+    s.add(record(rmid=10, info=0x00, xid=4, blocks=block_ref(data_len=100), block_data=b"x" * 100, main=b"m" * 9000))
+    data = s.slice_from(s.start)
+    assert XLogWalker(start_lsn=s.start, seg_size=seg).feed(data) == [
+        RelChange(xid=4, db_oid=5, relfilenode=16384, kind="insert")
+    ]
+    with pytest.raises(WalSyncError, match="implausible record length"):
+        XLogWalker(start_lsn=s.start).feed(data)
+
+
+def test_walker_honors_larger_wal_segment_size() -> None:
+    """A 64 MB-segment stream decodes with seg_size=64MB; the 16 MB default
+    expects a long header at the false 16 MB boundary and desyncs."""
+    seg = 64 * 1024 * 1024
+    start = seg + 16 * 1024 * 1024 - BLCKSZ  # one page before a false 16 MB boundary
+    s = WalStream(start, seg=seg)
+    s.add(record(rmid=10, info=0x00, xid=5, blocks=block_ref(data_len=100), block_data=b"x" * 100, main=b"m" * 9000))
+    s.add(heap_insert(xid=6))
+    data = s.slice_from(s.start)
+    events = XLogWalker(start_lsn=s.start, seg_size=seg).feed(data)
+    assert [e.xid for e in events if isinstance(e, RelChange)] == [5, 6]
+    with pytest.raises(WalSyncError, match="block size"):
+        XLogWalker(start_lsn=s.start).feed(data)
+
+
 def test_byte_at_a_time_feeding_matches_single_feed() -> None:
     s = WalStream(start_lsn())
     s.add(heap_insert(xid=1))
@@ -297,6 +326,18 @@ def test_xlog_switch_skips_headerless_zero_fill() -> None:
     s.add_switch_padding()
     s.add(heap_insert(xid=8))
     assert walk(s) == [RelChange(xid=8, db_oid=5, relfilenode=16384, kind="insert")]
+
+
+def test_xlog_switch_before_emit_from_still_skips_zero_fill() -> None:
+    """A switch record that is pre-attach history must still arm the zero-fill
+    skip: framing side effects cannot depend on emission gating."""
+    s = WalStream(start_lsn())
+    s.add(record(rmid=0, info=0x40))  # XLOG_SWITCH, already written at attach time
+    boundary = s.pos
+    s.add_switch_padding()
+    s.add(heap_insert(xid=8))
+    walker = XLogWalker(start_lsn=s.start, emit_from=boundary)
+    assert walker.feed(s.slice_from(s.start)) == [RelChange(xid=8, db_oid=5, relfilenode=16384, kind="insert")]
 
 
 def test_fpi_with_compressed_hole_is_skipped_correctly() -> None:
@@ -378,6 +419,12 @@ def test_unknown_magic_warns_once_and_decodes(caplog: pytest.LogCaptureFixture) 
 def test_unaligned_start_lsn_is_rejected() -> None:
     with pytest.raises(ValueError, match="page-aligned"):
         XLogWalker(start_lsn=start_lsn() + 1)
+
+
+@pytest.mark.parametrize("seg_size", [BLCKSZ * 3, 4096])  # not a power of two; below BLCKSZ
+def test_invalid_seg_size_is_rejected(seg_size: int) -> None:
+    with pytest.raises(ValueError, match="seg_size"):
+        XLogWalker(start_lsn=start_lsn(), seg_size=seg_size)
 
 
 def test_page_floor_aligns_down() -> None:

@@ -11,6 +11,7 @@ Mechanism: docs/physical-wal.md.
 
 import asyncio
 import logging
+import re
 import ssl as ssl_module
 import time
 from dataclasses import dataclass, field
@@ -20,7 +21,15 @@ from pgnudge.engine import BaseFeed, trace_frame
 from pgnudge.proto import WalsenderConnection, XLogData, format_lsn, parse_lsn
 from pgnudge.xlog import CommitGate, RelChange, WalSyncError, XLogWalker
 
-__all__ = ["RawFeed", "RelResolver"]
+__all__ = ["RawFeed", "RelResolver", "parse_pg_size"]
+
+
+def parse_pg_size(text: str) -> int:
+    """A pg_size-style setting value (``16MB``, ``1GB``, ``16384kB``) to bytes."""
+    m = re.fullmatch(r"(\d+)\s*(B|kB|MB|GB)?", text.strip())
+    if m is None:
+        raise ValueError(f"unparseable size {text!r}")
+    return int(m.group(1)) * {"B": 1, "kB": 1024, "MB": 1024**2, "GB": 1024**3}[m.group(2) or "B"]
 
 
 @dataclass(slots=True, kw_only=True)
@@ -163,13 +172,12 @@ class RawFeed(BaseFeed):
                 await self._reconnect_pause(attempt)
                 continue
 
-            self._record_connect_success()  # stream connect + auth succeeded; clear failure state
-
             # Nested async with drives abort() for both sockets on every exit
             # path (WalsenderConnection.__aexit__); the finally only resets state.
             async with stream:
                 self.stream_conn = stream
                 self.connection_pid = stream.backend_pid
+                live = False  # set once the stream goes live; setup deaths count as connect failures
                 try:
                     catalog = await self.connect_once("database")
                     async with catalog:
@@ -189,12 +197,20 @@ class RawFeed(BaseFeed):
                         if not inserted or inserted[0][0] is None:
                             raise ConnectionError("could not determine the WAL insert position")
                         insert_lsn = parse_lsn(inserted[0][0])
+                        # long page headers sit at wal_segment_size boundaries; the
+                        # 16MB default only holds for a default-initdb'd cluster
+                        sized = await catalog.simple_query_rows("SHOW wal_segment_size")
+                        if not sized or sized[0][0] is None:
+                            raise ConnectionError("could not determine wal_segment_size")
+                        seg_size = parse_pg_size(sized[0][0])
                         # page-align down; the first page's rem_len resynchronizes the walker
                         start = XLogWalker.page_floor(flush_lsn)
                         await stream.start_replication(
                             f"START_REPLICATION PHYSICAL {format_lsn(start)} TIMELINE {timeline}"
                         )
                         attempt = 0
+                        live = True
+                        self._record_connect_success()
                         self._emit_resync("connected" if first else "reconnected")
                         self.log.info(
                             "streaming physical WAL from %s timeline %d (backend pid %s)",
@@ -204,7 +220,7 @@ class RawFeed(BaseFeed):
                         )
                         first = False
 
-                        walker = XLogWalker(start_lsn=start, emit_from=insert_lsn)
+                        walker = XLogWalker(start_lsn=start, emit_from=insert_lsn, seg_size=seg_size)
                         gate = CommitGate()
                         self.last_lsn = flush_lsn
                         self.last_inbound = time.monotonic()
@@ -232,6 +248,8 @@ class RawFeed(BaseFeed):
                 except Exception as exc:
                     # fall through to reconnect from the new flush position
                     self.log.warning("stream error, reconnecting: %s", exc)
+                    if not live:
+                        self._record_connect_failure(exc)
                 finally:
                     self.connection_pid = None
                     self.stream_conn = None

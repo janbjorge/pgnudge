@@ -183,14 +183,13 @@ class WalFeed(BaseFeed):
                 await self._reconnect_pause(attempt)
                 continue
 
-            self._record_connect_success()  # connect + auth succeeded; clear failure state
-
             # async with drives abort() on both the normal and the error path
             # (WalsenderConnection.__aexit__); the finally only resets our state.
             async with conn:
                 self.conn = conn
                 self.connection_pid = conn.backend_pid
                 slot = f"pgnudge_{os.getpid()}_{secrets.token_hex(3)}"
+                live = False  # set once the stream goes live; setup deaths count as connect failures
                 try:
                     # SNAPSHOT 'nothing': from-connect-only, the Resync refetch is the backfill
                     create_slot = (
@@ -203,6 +202,8 @@ class WalFeed(BaseFeed):
                     )
                     self.slot_name = slot
                     attempt = 0
+                    live = True
+                    self._record_connect_success()
                     self._emit_resync("connected" if first else "reconnected")
                     self.log.info("streaming from slot %s (backend pid %s)", slot, conn.backend_pid)
                     first = False
@@ -228,6 +229,8 @@ class WalFeed(BaseFeed):
                 except Exception as exc:
                     # fall through to reconnect with a fresh slot
                     self.log.warning("stream error on slot %s, reconnecting: %s", slot, exc)
+                    if not live:
+                        self._record_connect_failure(exc)
                 finally:
                     self.connection_pid = None
                     self.slot_name = None

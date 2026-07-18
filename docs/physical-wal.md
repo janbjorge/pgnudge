@@ -63,7 +63,11 @@ timeline.[^3] The feed:
    flush position, because record framing is only recoverable at page
    starts (the page header's `xlp_rem_len` says how much of an
    in-flight record to skip);
-3. suppresses events from records that end at or before the watermark.
+3. queries `SHOW wal_segment_size` and hands it to the walker: long
+   page headers sit at segment boundaries, so a cluster initdb'd with a
+   non-default `--wal-segsize` would otherwise desync at the first
+   boundary the walker and server disagree on;
+4. suppresses events from records that end at or before the watermark.
 
 Slot-less means the server retains nothing for a disconnected feed.
 There is nothing to fast-forward through and nothing to resume;
